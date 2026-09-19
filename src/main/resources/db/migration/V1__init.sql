@@ -1,0 +1,6 @@
+-- V1: baseline do schema.
+-- Deliberadamente vazia na Fase 0: confirma que o Flyway está ligado à base de
+-- dados correta e que o histórico de migrações (tabela flyway_schema_history)
+-- é criado com sucesso. As tabelas de domínio (fds, fornecedor, obra,
+-- centro_produtivo, ticket_fds, fds_auditoria) chegam na Fase 1 em diante,
+-- uma migração por agregado/funcionalidade.

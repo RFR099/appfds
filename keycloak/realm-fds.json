@@ -1,0 +1,50 @@
+{
+  "realm": "fds",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "fds-admin", "description": "Administrador da plataforma de gestão de produtos químicos" },
+      { "name": "fds-gestor", "description": "Gestor de segurança: cria/atualiza FDS, tickets e alertas" },
+      { "name": "fds-operador", "description": "Operador de obra: apenas consulta FDS" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "fds-frontend",
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    },
+    {
+      "clientId": "fds-backend",
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "secret": "changeit-in-dev"
+    }
+  ],
+  "users": [
+    {
+      "username": "gestor.dev",
+      "enabled": true,
+      "email": "gestor.dev@dstgroup.local",
+      "credentials": [{ "type": "password", "value": "gestor123", "temporary": false }],
+      "realmRoles": ["fds-gestor"]
+    },
+    {
+      "username": "admin.dev",
+      "enabled": true,
+      "email": "admin.dev@dstgroup.local",
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["fds-admin"]
+    }
+  ]
+}

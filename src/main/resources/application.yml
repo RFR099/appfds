@@ -1,0 +1,107 @@
+spring:
+  application:
+    name: fds-backend
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:fds}
+    username: ${DB_USER:fds}
+    password: ${DB_PASSWORD:fds}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate   # o schema é sempre governado pelo Flyway, nunca pelo Hibernate
+    open-in-view: false     # evita "sessão aberta na view", boa prática com Onion/camadas explícitas
+    properties:
+      hibernate:
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # URL do realm Keycloak; o Spring vai buscar automaticamente o JWKS a
+          # partir de {issuer-uri}/protocol/openid-connect/certs
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8081/realms/fds}
+
+  servlet:
+    multipart:
+      # Tem de acompanhar (ou exceder ligeiramente) o limite de 5 MB validado
+      # em ImagemProduto — caso contrário o Spring rejeita o upload antes de
+      # chegar ao nosso código, com um erro genérico em vez do
+      # ImagemProdutoInvalidaException do domínio.
+      max-file-size: 5MB
+      max-request-size: 5MB
+
+  mail:
+    # Em desenvolvimento aponta para o MailHog do docker-compose.yml — nenhum
+    # e-mail real é enviado; a UI de inspeção fica em http://localhost:8025.
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${MAIL_SMTP_AUTH:false}
+          starttls:
+            enable: ${MAIL_SMTP_STARTTLS:false}
+
+app:
+  storage:
+    imagens:
+      dir: ${FDS_IMAGENS_DIR:/tmp/fds-imagens}
+  jobs:
+    marcar-fds-obsoletas:
+      # todos os dias à meia-noite — a validade tem granularidade de dias
+      cron: ${FDS_MARCAR_OBSOLETAS_CRON:0 0 0 * * *}
+  mail:
+    remetente: ${FDS_MAIL_REMETENTE:noreply@dstgroup.pt}
+  alertas:
+    # RF09 — janela de pré-aviso antes da DataValidade expirar (dias) e
+    # limiar de "sem resposta do fornecedor" para tickets em aberto (dias).
+    fds-dias-antecedencia: ${FDS_ALERTAS_DIAS_ANTECEDENCIA:30}
+    ticket-dias-sem-resposta: ${FDS_ALERTAS_TICKET_DIAS_SEM_RESPOSTA:5}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # "metrics" adicionado na Fase 5, Parte 4 — expõe os contadores de
+        # negócio (fds.criadas, fds.marcadas.obsoletas, tickets.abertos) via
+        # /actuator/metrics/{nome}. O health check do diretório de imagens
+        # (ImagemStorageHealthIndicator) não precisa de nada aqui — já fica
+        # incluído automaticamente em /actuator/health, que já estava exposto.
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      # show-details fica no valor por omissão ("never"): /actuator/health/**
+      # é permitAll (sem autenticação, ver SecurityConfig), e os detalhes do
+      # ImagemStorageHealthIndicator incluem o caminho do diretório no
+      # filesystem — expor isso a quem quer que consulte o endpoint
+      # contrariaria o mesmo princípio já seguido em GlobalExceptionHandler
+      # (Fase 5, Parte 3): nunca revelar detalhes internos a um chamador não
+      # autenticado. O estado agregado (UP/DOWN) já é suficiente para
+      # alimentar alerting/monitorização.
+
+server:
+  port: ${SERVER_PORT:8080}
+
+logging:
+  level:
+    com.dstgroup.fds: DEBUG
+    org.springframework.security: INFO
+  pattern:
+    # %X{requestId} lê o SLF4J MDC preenchido por RequestIdFilter (Fase 5,
+    # Parte 4) — junta todas as linhas de log de um mesmo pedido HTTP, mesmo
+    # quando vários pedidos se intercalam no mesmo output. O ":-sem-id" é o
+    # valor por omissão do Logback quando a chave não está no MDC (ex.: logs
+    # emitidos fora de um pedido HTTP, como o job agendado de marcar FDS
+    # obsoletas).
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%15.15t] [requestId=%X{requestId:-sem-id}] %-40.40logger{39} : %m%n%wEx"

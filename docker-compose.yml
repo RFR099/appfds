@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fds-postgres
+    environment:
+      POSTGRES_DB: fds
+      POSTGRES_USER: fds
+      POSTGRES_PASSWORD: fds
+    ports:
+      - "5432:5432"
+    volumes:
+      - fds_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fds"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: fds-keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./keycloak/realm-fds.json:/opt/keycloak/data/import/realm-fds.json
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: fds-mailhog
+    ports:
+      - "1025:1025"  # SMTP — é para aqui que o EmailNotificadorAdapter envia
+      - "8025:8025"  # UI web para inspecionar os e-mails "enviados"
+
+volumes:
+  fds_postgres_data:
