@@ -3,6 +3,9 @@ package com.dstgroup.fds.application.usecase;
 import java.time.Clock;
 import java.time.Instant;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.dstgroup.fds.application.dto.AbrirTicketCommand;
 import com.dstgroup.fds.application.dto.AbrirTicketResponse;
 import com.dstgroup.fds.application.port.out.FornecedorRepositoryPort;
@@ -28,11 +31,15 @@ import com.dstgroup.fds.domain.ticket.TicketFDS;
  * nada); depois persiste o ticket; só depois tenta notificar. Se a
  * notificação falhar (ex.: SMTP em baixo), o ticket já persistido não é
  * desfeito — o facto de negócio "foi aberto um pedido" mantém-se válido
- * mesmo que o e-mail falhe transitoriamente. A métrica {@code tickets.abertos}
- * (Fase 5, Parte 4) é incrementada logo a seguir a persistir, pela mesma
- * razão — reflete o facto de negócio, não se a notificação teve sucesso.</p>
+ * mesmo que o e-mail falhe transitoriamente, por isso a exceção do
+ * {@link NotificadorPort} é apanhada e apenas registada em log, nunca
+ * propagada ao chamador. A métrica {@code tickets.abertos} (Fase 5, Parte 4)
+ * é incrementada logo a seguir a persistir, pela mesma razão — reflete o
+ * facto de negócio, não se a notificação teve sucesso.</p>
  */
 public class AbrirTicketUseCase {
+
+	private static final Logger LOG = LoggerFactory.getLogger(AbrirTicketUseCase.class);
 
 	private final TicketFDSRepositoryPort repositorio;
 	private final FornecedorRepositoryPort fornecedorRepositorio;
@@ -65,13 +72,18 @@ public class AbrirTicketUseCase {
 		repositorio.guardar(ticket);
 		metricas.incrementarTicketsAbertos();
 
-		notificador.enviar(
-				fornecedor.emailPrincipal().valor(),
-				"Pedido de Ficha de Dados de Segurança",
-				comando.mensagemInicial() != null && !comando.mensagemInicial().isBlank()
-						? comando.mensagemInicial()
-						: "Foi aberto um novo pedido de Ficha de Dados de Segurança."
-		);
+		try {
+			notificador.enviar(
+					fornecedor.emailPrincipal().valor(),
+					"Pedido de Ficha de Dados de Segurança",
+					comando.mensagemInicial() != null && !comando.mensagemInicial().isBlank()
+							? comando.mensagemInicial()
+							: "Foi aberto um novo pedido de Ficha de Dados de Segurança."
+			);
+		} catch (RuntimeException e) {
+			LOG.warn("Não foi possível notificar o fornecedor {} sobre o ticket {} — o ticket mantém-se aberto.",
+					fornecedorId, ticket.id(), e);
+		}
 
 		return new AbrirTicketResponse(ticket.id().toString());
 	}
