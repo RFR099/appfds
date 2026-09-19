@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.LocalDate;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -66,6 +67,9 @@ class FDSRepositoryAdapterIT {
 	@Autowired
 	private CentroProdutivoJpaRepository centroProdutivoJpaRepository;
 
+	@Autowired
+	private FornecedorJpaRepository fornecedorJpaRepository;
+
 	private FDSRepositoryAdapter adapter;
 
 	@BeforeEach
@@ -73,10 +77,18 @@ class FDSRepositoryAdapterIT {
 		adapter = new FDSRepositoryAdapter(jpaRepository);
 	}
 
+	// o fornecedor tem de existir de facto — fds.fornecedor_id tem FK para
+	// fornecedor.id (ver V3__create_fornecedor_table.sql)
+	private FornecedorId criarFornecedorPersistido() {
+		FornecedorJpaEntity entidade = fornecedorJpaRepository.save(
+				new FornecedorJpaEntity(UUID.randomUUID(), "Fornecedor de Teste", "fornecedor@teste.pt", List.of()));
+		return new FornecedorId(entidade.getId());
+	}
+
 	@Test
 	void deveGuardarERecuperarFDSDaBaseDeDados() {
 		FichaDadosSeguranca fds = FichaDadosSeguranca.criarRascunho("SprayMount", new Marca("3M"),
-				FornecedorId.gerar(), new Email("f@3m.com"),
+				criarFornecedorPersistido(), new Email("f@3m.com"),
 				new DataValidade(LocalDate.of(2026, 1, 1), LocalDate.of(2027, 1, 1)),
 				EnumSet.of(PictogramaPerigo.CORROSIVOS), null);
 
@@ -90,14 +102,14 @@ class FDSRepositoryAdapterIT {
 
 	@Test
 	void deveDetetarDuplicadoNaBaseDeDados() {
-		FornecedorId fornecedorId = FornecedorId.gerar();
+		FornecedorId fornecedorId = criarFornecedorPersistido();
 		FichaDadosSeguranca fds = FichaDadosSeguranca.criarRascunho("SOLIM D-SAN", new Marca("A2Brios"),
 				fornecedorId, null, null, null, null);
 		adapter.guardar(fds);
 
 		boolean existeDuplicado = adapter.existeDuplicado("SOLIM D-SAN", new Marca("A2Brios"), fornecedorId);
 		boolean naoExisteParaOutroFornecedor = adapter.existeDuplicado("SOLIM D-SAN", new Marca("A2Brios"),
-				FornecedorId.gerar());
+				criarFornecedorPersistido());
 
 		assertThat(existeDuplicado).isTrue();
 		assertThat(naoExisteParaOutroFornecedor).isFalse();
@@ -140,11 +152,11 @@ class FDSRepositoryAdapterIT {
 
 	@Test
 	void deveFiltrarPorFornecedor() {
-		FornecedorId fornecedorA = FornecedorId.gerar();
+		FornecedorId fornecedorA = criarFornecedorPersistido();
 		adapter.guardar(FichaDadosSeguranca.criarRascunho("Produto do Fornecedor A", new Marca("3M"),
 				fornecedorA, null, null, null, null));
 		adapter.guardar(FichaDadosSeguranca.criarRascunho("Produto de Outro Fornecedor", new Marca("3M"),
-				FornecedorId.gerar(), null, null, null, null));
+				criarFornecedorPersistido(), null, null, null, null));
 
 		Pagina<FichaDadosSeguranca> pagina = adapter.listar(
 				new FiltroFDS(null, null, fornecedorA, null, null, null), 0, 10);
@@ -156,7 +168,7 @@ class FDSRepositoryAdapterIT {
 	@Test
 	void deveFiltrarPorEstado() {
 		FichaDadosSeguranca completa = FichaDadosSeguranca.criarRascunho("Produto Completo", new Marca("3M"),
-				FornecedorId.gerar(), new Email("f@3m.com"),
+				criarFornecedorPersistido(), new Email("f@3m.com"),
 				new DataValidade(LocalDate.of(2026, 1, 1), LocalDate.of(2027, 1, 1)),
 				EnumSet.of(PictogramaPerigo.CORROSIVOS), null);
 		completa.atualizarPara(EstadoFDS.ATUALIZADA);

@@ -12,8 +12,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -69,6 +71,13 @@ class TicketControllerIT {
 
 	@Autowired
 	private ObjectMapper objectMapper;
+
+	// Sem servidor SMTP real disponível nos testes (ao contrário do MailHog do
+	// docker-compose.yml em desenvolvimento) — sem isto, abrir um ticket falha
+	// a meio (AbrirTicketUseCase notifica o fornecedor por e-mail) por não
+	// conseguir ligar a localhost:1025.
+	@MockBean
+	private JavaMailSender mailSender;
 
 	@Test
 	void abrirSemTokenDeveDevolver401() throws Exception {
