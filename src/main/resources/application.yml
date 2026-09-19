@@ -52,6 +52,10 @@ spring:
             enable: ${MAIL_SMTP_STARTTLS:false}
 
 app:
+  cors:
+    # Origens do frontend autorizadas a chamar a API diretamente do browser
+    # (ver SecurityConfig). Suporta uma lista separada por vírgulas.
+    allowed-origins: ${FDS_CORS_ALLOWED_ORIGINS:http://localhost:5173}
   storage:
     imagens:
       dir: ${FDS_IMAGENS_DIR:/tmp/fds-imagens}
