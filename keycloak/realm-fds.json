@@ -18,7 +18,7 @@
       "redirectUris": ["http://localhost:5173/*"],
       "webOrigins": ["http://localhost:5173"],
       "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": false,
+      "directAccessGrantsEnabled": true,
       "attributes": {
         "pkce.code.challenge.method": "S256"
       }
@@ -36,6 +36,9 @@
       "username": "gestor.dev",
       "enabled": true,
       "email": "gestor.dev@dstgroup.local",
+      "emailVerified": true,
+      "firstName": "Gestor",
+      "lastName": "Dev",
       "credentials": [{ "type": "password", "value": "gestor123", "temporary": false }],
       "realmRoles": ["fds-gestor"]
     },
@@ -43,6 +46,9 @@
       "username": "admin.dev",
       "enabled": true,
       "email": "admin.dev@dstgroup.local",
+      "emailVerified": true,
+      "firstName": "Admin",
+      "lastName": "Dev",
       "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
       "realmRoles": ["fds-admin"]
     }
