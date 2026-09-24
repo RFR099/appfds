@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Badge, Button, Card, cx, ErrorBox, Icon, InvoiceBadge, Loading, Modal, StatusBadge } from '../components/ui'
-import { api } from '../lib/api'
+import { api, photoUrl } from '../lib/api'
 import { date, dateLong, dateTime, duration, hours, ISSUE_CATEGORIES, marginClass, money, pct, time } from '../lib/format'
 import type { ServiceFull } from '../lib/types'
 import { useApi } from '../lib/useApi'
@@ -139,7 +139,7 @@ export default function ServiceDetail() {
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                   {s.photos.map((p) => (
                     <button key={p.id} onClick={() => setPhoto(p.id)} className="aspect-[4/3] overflow-hidden rounded-lg bg-slate-100 ring-1 ring-slate-200 hover:ring-brand-500">
-                      <img src={`/api/photos/${p.id}`} alt={p.original_name ?? 'Fotografia do serviço'} loading="lazy" className="size-full object-cover" />
+                      <img src={photoUrl(p.id)} alt={p.original_name ?? 'Fotografia do serviço'} loading="lazy" className="size-full object-cover" />
                     </button>
                   ))}
                 </div>
@@ -204,7 +204,7 @@ export default function ServiceDetail() {
       </div>
 
       <Modal open={photo !== null} onClose={() => setPhoto(null)} title="Fotografia" wide>
-        {photo && <img src={`/api/photos/${photo}`} alt="Fotografia do serviço" className="w-full rounded-lg" />}
+        {photo && <img src={photoUrl(photo)} alt="Fotografia do serviço" className="w-full rounded-lg" />}
       </Modal>
       <Modal open={cancelOpen} onClose={() => setCancelOpen(false)} title={`Cancelar serviço #${s.id}`}
         footer={<>

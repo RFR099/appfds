@@ -1,6 +1,7 @@
 import { lazy, Suspense, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { Loading } from './components/ui'
+import { DEMO } from './lib/api'
 import { homeFor, useAuth } from './lib/auth'
 import type { Role } from './lib/types'
 import Login from './Login'
@@ -25,6 +26,11 @@ export default function App() {
   if (loading) return <Loading />
   return (
     <Suspense fallback={<Loading />}>
+      {DEMO && (
+        <div className="fixed bottom-24 left-1/2 z-[60] -translate-x-1/2 rounded-full bg-slate-900/85 px-4 py-1.5 text-xs text-white shadow-lg lg:bottom-4">
+          Demonstração · dados fictícios · alterações do diretor não são guardadas
+        </div>
+      )}
       <Routes>
         <Route path="/login" element={user ? <Navigate to={homeFor(user)} replace /> : <Login />} />
         <Route path="/diretor/*" element={<RequireRole role="director"><DirectorApp /></RequireRole>} />

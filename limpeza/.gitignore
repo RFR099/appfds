@@ -2,3 +2,5 @@ node_modules/
 client/dist/
 server/data/
 *.tsbuildinfo
+client/dist-demo/
+client/demo/

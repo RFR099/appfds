@@ -11,7 +11,25 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn
 }
 
+/** Build de demonstração (VITE_DEMO=1): sem servidor, dados gravados em demo/snapshot.json. */
+export const DEMO = import.meta.env.VITE_DEMO === '1'
+let demo: typeof import('./demo') | null = null
+
+export function photoUrl(id: number) {
+  return DEMO ? demo?.demoPhotoUrl(id) ?? '' : `/api/photos/${id}`
+}
+
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+  if (DEMO) {
+    demo ??= await import('./demo')
+    try {
+      return await demo.demoRequest<T>(method, url, body)
+    } catch (e) {
+      const status = (e as { status?: number }).status ?? 500
+      if (status === 401 && !url.startsWith('/auth/login')) onUnauthorized?.()
+      throw new ApiError(status, (e as Error).message)
+    }
+  }
   const headers: Record<string, string> = { 'X-Requested-With': 'limpeza-app' }
   let payload: BodyInit | undefined
   if (body instanceof FormData) payload = body

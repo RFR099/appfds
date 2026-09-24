@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { RankBars } from '../components/charts'
 import { Card, cx, Empty, Icon, Loading, PageHeader, Stat } from '../components/ui'
-import { qs } from '../lib/api'
+import { DEMO, qs } from '../lib/api'
 import { EVENT_ICON } from './Dashboard'
 import { addDays, dateTime, firstOfMonth, hours, ISSUE_CATEGORIES, lastOfMonth, localDate, marginClass, money, money0, monthLong, pct, STATUS } from '../lib/format'
 import type { Agg, GroupAgg, TimelineEvent } from '../lib/types'
@@ -35,10 +35,12 @@ export default function Reports() {
       <PageHeader title="Relatórios" subtitle={<span >Resumo de {monthLong(month)}</span>}
         actions={<>
           <input type="month" className="field w-auto" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)} />
+          {!DEMO && <>
           <a className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm ring-1 ring-slate-300 hover:bg-slate-50" href={`/api/admin/reports/services.csv${qs(range)}`}><Icon name="download" className="size-4" /> Serviços (CSV)</a>
           <a className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm ring-1 ring-slate-300 hover:bg-slate-50" href={`/api/admin/reports/payroll.csv?month=${month}`}><Icon name="download" className="size-4" /> Pagamentos (CSV)</a>
           <a className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm ring-1 ring-slate-300 hover:bg-slate-50" href={`/api/admin/reports/clients.csv${qs(range)}`}><Icon name="download" className="size-4" /> Clientes (CSV)</a>
           <button className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm ring-1 ring-slate-300 hover:bg-slate-50" onClick={() => window.print()}>Imprimir</button>
+          </>}
         </>} />
       {loading && !data ? <Loading /> : data && (
         <>

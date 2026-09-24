@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Icon, Loading, Modal } from '../components/ui'
-import { api } from '../lib/api'
+import { api, photoUrl } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { ISSUE_CATEGORIES, time } from '../lib/format'
 import type { OpService } from '../lib/types'
@@ -64,7 +64,7 @@ export default function ServicePage() {
         <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
           <h2 className="mb-3 text-sm font-bold tracking-wider text-slate-500 uppercase">Fotografias ({s.photos.length})</h2>
           <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
-            {s.photos.map((p) => <img key={p.id} src={`/api/photos/${p.id}`} alt="Fotografia do serviço" loading="lazy" className="aspect-[4/3] w-full rounded-xl object-cover ring-1 ring-slate-200" />)}
+            {s.photos.map((p) => <img key={p.id} src={photoUrl(p.id)} alt="Fotografia do serviço" loading="lazy" className="aspect-[4/3] w-full rounded-xl object-cover ring-1 ring-slate-200" />)}
           </div>
         </section>
       )}
