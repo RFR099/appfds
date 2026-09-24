@@ -39,23 +39,272 @@ function parseNum(str) {
 
 const STORAGE_KEY = "controlo-pessoal-data";
 
+// Dados de partida — só usados quando ainda não há nada guardado. Espelham o
+// livro real a 24/09/2026 e já incluem o efeito de todas as migrações abaixo
+// (por isso a lista `migrations` vem completa e nenhuma volta a correr).
+const SEED_DATA = {
+  events: [
+    {
+      id: "mjxz8g8n",
+      date: "2026-09-05",
+      text: "Trabalho para Frangos e Companhia",
+      hours: 1,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "5u3yxjnh",
+      date: "2026-09-12",
+      text: "Trabalho para Frangos e Companhia",
+      hours: 1,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "i31ign8i",
+      date: "2026-09-06",
+      text: "Trabalho para Escondidinho",
+      hours: 1,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "b0lquxvg",
+      date: "2026-09-13",
+      text: "Trabalho para Escondidinho",
+      hours: 1,
+      clientId: "tpassy9p"
+    }
+  ],
+  incomes: [
+    {
+      id: "1ymso1ro",
+      desc: "Receita de maio",
+      amount: 400,
+      date: "2026-05-01",
+      received: true,
+      clientId: null
+    },
+    {
+      id: "u4x9yltq",
+      desc: "Receita de junho",
+      amount: 200,
+      date: "2026-06-01",
+      received: true,
+      clientId: null
+    },
+    {
+      id: "zeqsfkbm",
+      desc: "Receita de julho",
+      amount: 200,
+      date: "2026-07-01",
+      received: true,
+      clientId: null
+    },
+    {
+      id: "3b6i18ci",
+      desc: "Pagamento",
+      amount: 200,
+      date: "2026-08-01",
+      received: true,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "g9ct9ymv",
+      desc: "Site",
+      amount: 325,
+      date: "2026-08-01",
+      received: true,
+      clientId: "pichfboa"
+    },
+    {
+      id: "vrj7vcug",
+      desc: "Pagamento",
+      amount: 100,
+      date: "2026-08-01",
+      received: true,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "p1izra09",
+      desc: "Pagamento",
+      amount: 200,
+      date: "2026-09-01",
+      received: true,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "esmens09",
+      desc: "mensalidade",
+      amount: 250,
+      date: "2026-09-01",
+      received: true,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "escart15",
+      desc: "cartoes visita",
+      amount: 150,
+      date: "2026-09-15",
+      received: true,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "espsite18",
+      desc: "site",
+      amount: 350,
+      date: "2026-09-18",
+      received: false,
+      clientId: "espomec1"
+    },
+    {
+      id: "prelab19",
+      desc: "Pagamento",
+      amount: 1500,
+      date: "2026-09-19",
+      received: false,
+      clientId: "prelabt1"
+    },
+    {
+      id: "frout01",
+      desc: "Pagamento",
+      amount: 200,
+      date: "2026-10-01",
+      received: false,
+      clientId: "ajxztgv5",
+      recurrence: "mensal"
+    },
+    {
+      id: "esout01",
+      desc: "Pagamento",
+      amount: 250,
+      date: "2026-10-01",
+      received: false,
+      clientId: "tpassy9p",
+      recurrence: "mensal"
+    }
+  ],
+  expenses: [
+    {
+      id: "8dukld3y",
+      desc: "Site (despesa associada)",
+      amount: 25,
+      date: "2026-08-01",
+      received: true,
+      clientId: "pichfboa"
+    },
+    {
+      id: "76hl7ri5",
+      desc: "Despesa associada",
+      amount: 100,
+      date: "2026-09-01",
+      received: true,
+      clientId: "ajxztgv5"
+    }
+  ],
+  notes: [
+    {
+      id: "wpm9osnb",
+      text: "Escondidinho deve 150€ de cartões (setembro), mais 250€ de gravações e 50€ de publicidade.\nTotal:550€",
+      date: "2026-09-01",
+      closed: true
+    },
+    {
+      id: "esago14n",
+      text: "escondidinho deve 100€ mes de agosto",
+      date: "2026-09-14",
+      closed: true
+    }
+  ],
+  clients: [
+    {
+      id: "l42lug6o",
+      name: "Amariaviaja",
+      contact: "",
+      note: "Abril: 400€ ganhos — finalizado",
+      contractStart: "2026-04-01",
+      contractEnd: "2026-04-30"
+    },
+    {
+      id: "ajxztgv5",
+      name: "Frangos e Companhia",
+      contact: "",
+      note: "",
+      serviceType: "redes_sociais",
+      status: "mensal",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "tpassy9p",
+      name: "Escondidinho",
+      contact: "",
+      note: "",
+      serviceType: "redes_sociais",
+      status: "mensal",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "pichfboa",
+      name: "pichelaria fonte boa",
+      note: "",
+      phone: "",
+      email: "",
+      serviceType: "site",
+      status: "compra_unica",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "espomec1",
+      name: "espomecanica",
+      note: "",
+      phone: "",
+      email: "",
+      serviceType: "site",
+      status: "compra_unica",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "prelabt1",
+      name: "prelabt- gestão de produtos quimicos",
+      note: "",
+      phone: "",
+      email: "",
+      status: "compra_unica",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    }
+  ],
+  migrations: [
+    "hist-mai-jun-jul-2026",
+    "set-2026-frangos-escondidinho",
+    "remove-escondidinho-ago-nao-pago",
+    "add-cliente-amariaviaja",
+    "patch-cliente-amariaviaja-fim-contrato",
+    "add-clientes-frangos-escondidinho",
+    "set-2026-horas-frangos-escondidinho",
+    "add-escondidinho-pendente-ago",
+    "link-clientes-antigos-receitas",
+    "link-clientes-antigos-despesas"
+  ]
+};
+
 function FinancasApp() {
   const [tab, setTab] = useState("calendario");
   const [loaded, setLoaded] = useState(false);
   const [saveError, setSaveError] = useState(false);
 
-  const [events, setEvents] = useState([]);
-  const [incomes, setIncomes] = useState([
-    { id: uid(), desc: "Saldo anterior", amount: 800, date: "2026-08-01" },
-    { id: uid(), desc: "Frangos e companhia", amount: 200, date: "2026-08-01" },
-    { id: uid(), desc: "Site pichelaria", amount: 325, date: "2026-08-01" },
-  ]);
-  const [expenses, setExpenses] = useState([
-    { id: uid(), desc: "Site pichelaria (despesa associada)", amount: 25, date: "2026-08-01" },
-  ]);
-  const [notes, setNotes] = useState([]);
-  const [clients, setClients] = useState([]);
-  const [migrations, setMigrations] = useState([]);
+  const [events, setEvents] = useState(SEED_DATA.events);
+  const [incomes, setIncomes] = useState(SEED_DATA.incomes);
+  const [expenses, setExpenses] = useState(SEED_DATA.expenses);
+  const [notes, setNotes] = useState(SEED_DATA.notes);
+  const [clients, setClients] = useState(SEED_DATA.clients);
+  const [migrations, setMigrations] = useState(SEED_DATA.migrations);
 
   // Migrações automáticas: correm só uma vez, mesmo entre utilizadores diferentes,
   // porque ficam registadas (por id) nos dados partilhados.
@@ -192,19 +441,14 @@ function FinancasApp() {
         // key doesn't exist yet — fine, start empty
       } finally {
         // Apply any migrations not yet run, on top of whatever data we have
-        let eventsBase = loadedEvents !== null ? loadedEvents : [];
-        let incomesBase = loadedIncomes !== null ? loadedIncomes : [
-          { id: uid(), desc: "Saldo anterior", amount: 800, date: "2026-08-01" },
-          { id: uid(), desc: "Frangos e companhia", amount: 200, date: "2026-08-01" },
-          { id: uid(), desc: "Site pichelaria", amount: 325, date: "2026-08-01" },
-        ];
-        let expensesBase = loadedExpenses !== null ? loadedExpenses : [
-          { id: uid(), desc: "Site pichelaria (despesa associada)", amount: 25, date: "2026-08-01" },
-        ];
-        let notesBase = loadedNotes !== null ? loadedNotes : [];
-        let clientsBase = loadedClients !== null ? loadedClients : [];
+        const hasSaved = loadedIncomes !== null;
+        let eventsBase = hasSaved ? loadedEvents : SEED_DATA.events;
+        let incomesBase = hasSaved ? loadedIncomes : SEED_DATA.incomes;
+        let expensesBase = hasSaved ? loadedExpenses : SEED_DATA.expenses;
+        let notesBase = hasSaved ? loadedNotes : SEED_DATA.notes;
+        let clientsBase = hasSaved ? loadedClients : SEED_DATA.clients;
 
-        const appliedIds = [...loadedMigrations];
+        const appliedIds = hasSaved ? [...loadedMigrations] : [...SEED_DATA.migrations];
         PENDING_MIGRATIONS.forEach((mig) => {
           if (!appliedIds.includes(mig.id)) {
             if (mig.applyClients) clientsBase = mig.applyClients(clientsBase);
