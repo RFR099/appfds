@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail } from "lucide-react";
+import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail, Download, Upload, Clock } from "lucide-react";
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 
 const MONTHS_ABBR = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
@@ -17,9 +17,10 @@ const HILITE = "#171A13";
 const MONTHS_PT = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
 const DAYS_PT = ["Seg","Ter","Qua","Qui","Sex","Sáb","Dom"];
 
+// data local (não UTC): toISOString daria o dia anterior entre a meia-noite e a 1h em PT
 function todayISO() {
   const d = new Date();
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function fmtEUR(n) {
@@ -31,10 +32,63 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-// aceita "123,45" ou "123.45" (teclado/decimal PT costuma usar vírgula)
+// aceita "123,45", "123.45", "1.500", "1.500,50", "1 500 €"
 function parseNum(str) {
   if (str === null || str === undefined) return NaN;
-  return Number(String(str).trim().replace(",", "."));
+  let s = String(str).trim().replace(/[\s€]/g, "");
+  if (s === "") return NaN;
+  if (s.includes(",")) {
+    // vírgula é a casa decimal; pontos só podem ser separadores de milhares
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) {
+    // "1.500" ou "12.000.000": pontos de milhares, não decimais
+    s = s.replace(/\./g, "");
+  }
+  return Number(s);
+}
+
+// Apagar pede confirmação no próprio sítio: o primeiro clique mostra
+// "apagar? sim / não" por cima da linha, sem mexer no resto da tabela.
+function DeleteButton({ onConfirm, question = "apagar?" }) {
+  const [asking, setAsking] = useState(false);
+  const small = { padding: "2px 8px", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", background: "none" };
+  return (
+    <span style={{ position: "relative", display: "flex" }}>
+      <button onClick={() => setAsking(true)} style={{ background: "none", border: "none", color: asking ? RED : INK_SOFT, display: "flex" }} aria-label="remover">
+        <Trash2 size={14} />
+      </button>
+      {asking && (
+        <span
+          role="alertdialog"
+          style={{
+            position: "absolute",
+            right: 0,
+            top: "50%",
+            transform: "translateY(-50%)",
+            zIndex: 5,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "5px 8px",
+            background: CARD,
+            border: `1px solid ${RED}`,
+            whiteSpace: "nowrap",
+            fontSize: 11,
+            fontFamily: "'IBM Plex Mono', monospace",
+            color: INK,
+          }}
+        >
+          {question}
+          <button autoFocus onClick={() => { setAsking(false); onConfirm(); }} style={{ ...small, border: `1px solid ${RED}`, color: RED }}>
+            sim
+          </button>
+          <button onClick={() => setAsking(false)} style={{ ...small, border: `1px solid ${LINE}`, color: INK_SOFT }}>
+            não
+          </button>
+        </span>
+      )}
+    </span>
+  );
 }
 
 const STORAGE_KEY = "controlo-pessoal-data";
@@ -488,6 +542,68 @@ function FinancasApp() {
   const totalExpense = useMemo(() => expenses.filter((e) => e.received !== false).reduce((s, e) => s + (Number(e.amount) || 0), 0), [expenses]);
   const balance = totalIncome - totalExpense;
 
+  // quantos registos (receitas, despesas, horas) cada cliente tem ligados
+  const clientUsage = useMemo(() => {
+    const map = {};
+    [...incomes, ...expenses, ...events].forEach((r) => {
+      if (r.clientId) map[r.clientId] = (map[r.clientId] || 0) + 1;
+    });
+    return map;
+  }, [incomes, expenses, events]);
+
+  const [backupMsg, setBackupMsg] = useState(null);
+  const [pendingImport, setPendingImport] = useState(null);
+
+  async function exportBackup() {
+    const data = JSON.stringify({ app: "innovatweb-financas", exportedAt: new Date().toISOString(), events, incomes, expenses, notes, clients, migrations }, null, 2);
+    const filename = `innovatweb-financas-${todayISO()}.json`;
+    try {
+      const downloads = window.claude && window.claude.use ? await window.claude.use("downloads") : null;
+      if (downloads) {
+        await downloads.save({ filename, data });
+      } else {
+        const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      setBackupMsg({ ok: true, text: `Cópia guardada: ${filename}` });
+    } catch (e) {
+      setBackupMsg({ ok: false, text: e && e.code === "declined" ? "Cópia cancelada." : "Não foi possível guardar a cópia." });
+    }
+  }
+
+  function readBackup(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!Array.isArray(parsed.incomes) || !Array.isArray(parsed.expenses) || !Array.isArray(parsed.clients)) throw new Error("formato");
+        setPendingImport({ name: file.name, data: parsed });
+        setBackupMsg(null);
+      } catch (e) {
+        setPendingImport(null);
+        setBackupMsg({ ok: false, text: "Este ficheiro não é uma cópia desta app." });
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function applyImport() {
+    const d = pendingImport.data;
+    setEvents(d.events || []);
+    setIncomes(d.incomes || []);
+    setExpenses(d.expenses || []);
+    setNotes(d.notes || []);
+    setClients(d.clients || []);
+    setMigrations(d.migrations || SEED_DATA.migrations);
+    setBackupMsg({ ok: true, text: `Dados repostos a partir de ${pendingImport.name}.` });
+    setPendingImport(null);
+  }
+
   return (
     <div>
       {/* Sub-nav horizontal + saldo */}
@@ -600,7 +716,7 @@ function FinancasApp() {
             />
           )}
           {tab === "notas" && <NotesView notes={notes} setNotes={setNotes} />}
-          {tab === "clientes" && <ClientesView clients={clients} setClients={setClients} />}
+          {tab === "clientes" && <ClientesView clients={clients} setClients={setClients} usage={clientUsage} />}
         </>
       )}
 
@@ -610,9 +726,50 @@ function FinancasApp() {
         </p>
       )}
 
-      <p style={{ marginTop: 40, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
-        os dados deste livro são partilhados — quem tiver este artifact vê e edita o mesmo
-      </p>
+      <div style={{ marginTop: 40, paddingTop: 16, borderTop: `1px solid ${LINE}`, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>cópia de segurança:</span>
+          <button
+            onClick={exportBackup}
+            disabled={!loaded}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", background: "none", border: `1px solid ${LINE}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <Download size={13} /> exportar
+          </button>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", border: `1px solid ${LINE}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }}
+          >
+            <Upload size={13} /> importar
+            <input
+              id="importar-copia"
+              type="file"
+              accept=".json,application/json"
+              onChange={(e) => { readBackup(e.target.files[0]); e.target.value = ""; }}
+              style={{ display: "none" }}
+            />
+          </label>
+        </div>
+        {pendingImport && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "10px 12px", border: `1px solid ${GOLD}`, background: HILITE, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            <span>
+              {pendingImport.name}: {pendingImport.data.incomes.length} receitas, {pendingImport.data.expenses.length} despesas, {pendingImport.data.clients.length} clientes.
+              Substitui todos os dados atuais.
+            </span>
+            <button onClick={applyImport} style={{ padding: "5px 12px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+              repor estes dados
+            </button>
+            <button onClick={() => setPendingImport(null)} style={{ padding: "5px 12px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+              cancelar
+            </button>
+          </div>
+        )}
+        {backupMsg && (
+          <p style={{ margin: 0, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: backupMsg.ok ? GREEN : RED }}>{backupMsg.text}</p>
+        )}
+        <p style={{ margin: 0, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+          os dados deste livro são partilhados — quem tiver este artifact vê e edita o mesmo
+        </p>
+      </div>
     </div>
   );
 }
@@ -645,7 +802,7 @@ function StatCell({ label, value, color, icon, border, strong }) {
   return (
     <div
       style={{
-        flex: 1,
+        flex: "1 1 150px",
         padding: "14px 16px",
         borderLeft: border ? `1px solid ${LINE}` : "none",
         background: strong ? HILITE : "transparent",
@@ -1144,13 +1301,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
                 >
                   <Pencil size={14} />
                 </button>
-                <button
-                  onClick={() => removeItem(item.id)}
-                  style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }}
-                  aria-label="remover"
-                >
-                  <Trash2 size={14} />
-                </button>
+                <DeleteButton onConfirm={() => removeItem(item.id)} />
               </span>
             </div>
             )
@@ -1322,7 +1473,7 @@ const fieldLabelStyle = {
   textTransform: "lowercase",
 };
 
-function ClientesView({ clients, setClients }) {
+function ClientesView({ clients, setClients, usage }) {
   const [form, setForm] = useState(emptyClientForm());
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(emptyClientForm());
@@ -1469,9 +1620,10 @@ function ClientesView({ clients, setClients }) {
                     <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="editar">
                       <Pencil size={14} />
                     </button>
-                    <button onClick={() => removeClient(c.id)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="remover">
-                      <Trash2 size={14} />
-                    </button>
+                    <DeleteButton
+                      onConfirm={() => removeClient(c.id)}
+                      question={usage[c.id] ? `tem ${usage[c.id]} registo${usage[c.id] === 1 ? "" : "s"} ligado${usage[c.id] === 1 ? "" : "s"}, que fica${usage[c.id] === 1 ? "" : "m"} sem cliente. apagar?` : "apagar cliente?"}
+                    />
                   </div>
                 </div>
               )}
@@ -1654,9 +1806,7 @@ function NotesView({ notes, setNotes }) {
                   <button onClick={() => startEdit(n)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="editar">
                     <Pencil size={14} />
                   </button>
-                  <button onClick={() => removeNote(n.id)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="remover">
-                    <Trash2 size={14} />
-                  </button>
+                  <DeleteButton onConfirm={() => removeNote(n.id)} />
                 </div>
               )}
             </div>
@@ -1665,6 +1815,13 @@ function NotesView({ notes, setNotes }) {
       )}
     </div>
   );
+}
+
+// dias de `from` até `to` (datas AAAA-MM-DD); positivo se `from` já passou
+function daysBetween(from, to) {
+  const a = Date.UTC(...from.split("-").map((n, i) => Number(n) - (i === 1 ? 1 : 0)));
+  const b = Date.UTC(...to.split("-").map((n, i) => Number(n) - (i === 1 ? 1 : 0)));
+  return Math.round((b - a) / 86400000);
 }
 
 function monthKey(dateStr) {
@@ -1749,7 +1906,11 @@ function BalancoView({ incomes, expenses, events, clients }) {
   const clientSummary = useMemo(() => {
     const map = {};
     (clients || []).forEach((c) => {
-      map[c.id] = { id: c.id, name: c.name, ganho: 0, gasto: 0 };
+      map[c.id] = { id: c.id, name: c.name, ganho: 0, gasto: 0, horas: 0 };
+    });
+    events.filter((e) => matchesFilter(e.date)).forEach((e) => {
+      if (!e.clientId || !map[e.clientId]) return;
+      map[e.clientId].horas += Number(e.hours) || 0;
     });
     receivedIncomes.filter((i) => matchesFilter(i.date)).forEach((i) => {
       if (!i.clientId || !map[i.clientId]) return;
@@ -1760,9 +1921,37 @@ function BalancoView({ incomes, expenses, events, clients }) {
       map[e.clientId].gasto += Number(e.amount) || 0;
     });
     return Object.values(map)
-      .map((row) => ({ ...row, liquido: row.ganho - row.gasto }))
-      .sort((a, b) => b.liquido - a.liquido);
-  }, [clients, receivedIncomes, paidExpenses, filterYear, filterMonth]);
+      .map((row) => {
+        const liquido = row.ganho - row.gasto;
+        return { ...row, liquido, lucro: liquido - row.horas * HOURLY_RATE };
+      })
+      .sort((a, b) => b.lucro - a.lucro);
+  }, [clients, receivedIncomes, paidExpenses, events, filterYear, filterMonth]);
+
+  // O que está por receber, agrupado por cliente (independente dos filtros:
+  // uma dívida antiga continua a ser dívida).
+  const today = todayISO();
+  const pendingIncomes = incomes.filter((i) => i.received === false);
+  const unpaidExpenses = expenses.filter((e) => e.received === false);
+  const totalPending = pendingIncomes.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const totalUnpaid = unpaidExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const forecast = balance + totalPending - totalUnpaid;
+
+  const receivables = useMemo(() => {
+    const map = {};
+    pendingIncomes.forEach((i) => {
+      const key = i.clientId || "sem-cliente";
+      if (!map[key]) {
+        const c = (clients || []).find((c) => c.id === i.clientId);
+        map[key] = { key, name: c ? c.name : "Sem cliente", total: 0, items: [] };
+      }
+      map[key].total += Number(i.amount) || 0;
+      map[key].items.push(i);
+    });
+    return Object.values(map)
+      .map((g) => ({ ...g, items: g.items.sort((a, b) => (a.date < b.date ? -1 : 1)) }))
+      .sort((a, b) => b.total - a.total);
+  }, [pendingIncomes, clients]);
 
   const hasData = incomes.length > 0 || expenses.length > 0;
 
@@ -1773,11 +1962,58 @@ function BalancoView({ incomes, expenses, events, clients }) {
   return (
     <div>
       {/* Summary row */}
-      <div style={{ display: "flex", gap: 0, marginBottom: 14, border: `1px solid ${LINE}`, background: CARD }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 0, marginBottom: 14, border: `1px solid ${LINE}`, background: CARD }}>
         <StatCell label="receitas" value={fmtEUR(totalIncome)} color={INK} icon={<TrendingUp size={14} />} />
         <StatCell label="despesas" value={fmtEUR(totalExpense)} color={RED} icon={<TrendingDown size={14} />} border />
         <StatCell label="saldo" value={fmtEUR(balance)} color={balance >= 0 ? GREEN : RED} icon={<Scale size={14} />} border strong />
+        <StatCell label="saldo previsto" value={fmtEUR(forecast)} color={forecast >= 0 ? GOLD : RED} icon={<Clock size={14} />} border />
       </div>
+      {(totalPending > 0 || totalUnpaid > 0) && (
+        <p style={{ margin: "-6px 0 18px", fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+          previsto = saldo + {fmtEUR(totalPending)} por receber{totalUnpaid > 0 ? ` − ${fmtEUR(totalUnpaid)} por pagar` : ""}
+        </p>
+      )}
+
+      {/* A receber */}
+      {receivables.length > 0 && (
+        <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 28 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+            <div>
+              <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>A receber</h3>
+              <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+                pagamentos pendentes por cliente · marca como recebido em Receitas
+              </p>
+            </div>
+            <span style={{ fontSize: 17, fontWeight: 700, color: GOLD, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtEUR(totalPending)}</span>
+          </div>
+          {receivables.map((g) => (
+            <div key={g.key} style={{ borderTop: `1px solid ${LINE}`, padding: "10px 0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 600 }}>
+                <span>{g.name}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: GOLD }}>{fmtEUR(g.total)}</span>
+              </div>
+              {g.items.map((i) => {
+                const d = daysBetween(i.date, today);
+                const late = d > 0;
+                return (
+                  <div key={i.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                    <span>
+                      {i.date.split("-").reverse().join("/")} · {i.desc}
+                      {i.recurrence === "mensal" ? " · mensal" : ""}
+                    </span>
+                    <span style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                      <span style={{ color: late ? RED : INK_SOFT }}>
+                        {d === 0 ? "hoje" : late ? `há ${d} dia${d === 1 ? "" : "s"}` : `daqui a ${-d} dia${d === -1 ? "" : "s"}`}
+                      </span>
+                      <span style={{ color: INK }}>{fmtEUR(i.amount)}</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Profit margin block */}
       <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 8, display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
@@ -1910,13 +2146,14 @@ function BalancoView({ incomes, expenses, events, clients }) {
         <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginTop: 28 }}>
           <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Resumo por cliente</h3>
           <p style={{ margin: "0 0 14px", fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
-            quanto cada empresa já rendeu e custou · mesmo período selecionado acima · atualiza sozinho
+            quanto cada empresa já rendeu e custou, incluindo as tuas horas a {HOURLY_RATE}€/h · mesmo período selecionado acima
           </p>
-          <div>
+          <div style={{ overflowX: "auto" }}>
+          <div style={{ minWidth: 560 }}>
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "1fr 100px 100px 110px",
+                gridTemplateColumns: "1fr 90px 90px 90px 60px 100px",
                 padding: "8px 4px",
                 fontSize: 11,
                 fontFamily: "'IBM Plex Mono', monospace",
@@ -1928,13 +2165,15 @@ function BalancoView({ incomes, expenses, events, clients }) {
               <span style={{ textAlign: "right" }}>ganhou</span>
               <span style={{ textAlign: "right" }}>gastou</span>
               <span style={{ textAlign: "right" }}>líquido</span>
+              <span style={{ textAlign: "right" }}>horas</span>
+              <span style={{ textAlign: "right" }}>lucro real</span>
             </div>
             {clientSummary.map((row) => (
               <div
                 key={row.id}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "1fr 100px 100px 110px",
+                  gridTemplateColumns: "1fr 90px 90px 90px 60px 100px",
                   padding: "10px 4px",
                   fontSize: 13,
                   alignItems: "center",
@@ -1948,18 +2187,25 @@ function BalancoView({ incomes, expenses, events, clients }) {
                 <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: RED }}>
                   {fmtEUR(row.gasto)}
                 </span>
+                <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: row.liquido >= 0 ? INK : RED }}>
+                  {fmtEUR(row.liquido)}
+                </span>
+                <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                  {row.horas ? `${row.horas} h` : "—"}
+                </span>
                 <span
                   style={{
                     textAlign: "right",
                     fontFamily: "'IBM Plex Mono', monospace",
                     fontWeight: 700,
-                    color: row.liquido >= 0 ? GREEN : RED,
+                    color: row.lucro >= 0 ? GREEN : RED,
                   }}
                 >
-                  {fmtEUR(row.liquido)}
+                  {fmtEUR(row.lucro)}
                 </span>
               </div>
             ))}
+          </div>
           </div>
         </div>
       )}
@@ -2244,9 +2490,7 @@ function CalendarView({ events, setEvents, clients }) {
                   <button onClick={() => startEdit(ev)} style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }} aria-label="editar">
                     <Pencil size={14} />
                   </button>
-                  <button onClick={() => removeEvent(ev.id)} style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }} aria-label="remover">
-                    <Trash2 size={14} />
-                  </button>
+                  <DeleteButton onConfirm={() => removeEvent(ev.id)} />
                 </span>
               </div>
               );
