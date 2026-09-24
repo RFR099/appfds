@@ -98,8 +98,8 @@ const STORAGE_KEY = "controlo-pessoal-data";
 const DEFAULT_SETTINGS = { hourlyRate: 15, marginStart: "2026-09-01" };
 
 // Dados de partida — só usados quando ainda não há nada guardado. Espelham o
-// livro real a 24/09/2026 e já incluem o efeito de todas as migrações abaixo
-// (por isso a lista `migrations` vem completa e nenhuma volta a correr).
+// livro real a 24/09/2026 e já incluem o efeito das correções automáticas
+// ("migrações") das versões anteriores, cujos ids ficam em `migrations`.
 const SEED_DATA = {
   events: [
     {
@@ -369,117 +369,6 @@ function FinancasApp() {
   const lastSynced = useRef(null);
   const [remoteNotice, setRemoteNotice] = useState(false);
 
-  // Migrações automáticas: correm só uma vez, mesmo entre utilizadores diferentes,
-  // porque ficam registadas (por id) nos dados partilhados.
-  const PENDING_MIGRATIONS = [
-    {
-      id: "hist-mai-jun-jul-2026",
-      applyIncomes: (arr) => [
-        ...arr,
-        { id: uid(), desc: "Receita de maio", amount: 400, date: "2026-05-01" },
-        { id: uid(), desc: "Receita de junho", amount: 200, date: "2026-06-01" },
-        { id: uid(), desc: "Receita de julho", amount: 200, date: "2026-07-01" },
-      ],
-    },
-    {
-      id: "set-2026-frangos-escondidinho",
-      applyIncomes: (arr) => [
-        ...arr,
-        { id: uid(), desc: "Frangos e companhia", amount: 200, date: "2026-09-01" },
-      ],
-      applyExpenses: (arr) => [
-        ...arr,
-        { id: uid(), desc: "Frangos e companhia (despesa associada)", amount: 100, date: "2026-09-01" },
-      ],
-      applyNotes: (arr) => [
-        ...arr,
-        {
-          id: uid(),
-          text: "Escondidinho deve 150€ de cartões (agosto e setembro), mais 250€ de gravações e 50€ de publicidade.",
-          date: "2026-09-01",
-        },
-      ],
-    },
-    {
-      id: "remove-escondidinho-ago-nao-pago",
-      applyIncomes: (arr) => arr.filter((i) => !(i.desc === "Escondidinho" && i.date === "2026-08-01")),
-    },
-    {
-      id: "add-cliente-amariaviaja",
-      applyClients: (arr) => [
-        ...arr,
-        {
-          id: uid(),
-          name: "Amariaviaja",
-          contact: "",
-          note: "Abril: 400€ ganhos — finalizado",
-          contractStart: "2026-04-01",
-          contractEnd: "2026-04-30",
-        },
-      ],
-    },
-    {
-      id: "patch-cliente-amariaviaja-fim-contrato",
-      applyClients: (arr) =>
-        arr.map((c) =>
-          c.name === "Amariaviaja" && !c.contractEnd ? { ...c, contractEnd: "2026-04-30", contractStart: c.contractStart || "2026-04-01" } : c
-        ),
-    },
-    {
-      id: "add-clientes-frangos-escondidinho",
-      applyClients: (arr) => [
-        ...arr,
-        { id: uid(), name: "Frangos e Companhia", contact: "", note: "", serviceType: "redes_sociais", status: "mensal", contractValue: 0, contractStart: "", contractEnd: "" },
-        { id: uid(), name: "Escondidinho", contact: "", note: "", serviceType: "redes_sociais", status: "mensal", contractValue: 0, contractStart: "", contractEnd: "" },
-      ],
-    },
-    {
-      id: "set-2026-horas-frangos-escondidinho",
-      applyEvents: (arr, clientsBase) => {
-        const frangos = clientsBase.find((c) => c.name === "Frangos e Companhia");
-        const escondidinho = clientsBase.find((c) => c.name === "Escondidinho");
-        return [
-          ...arr,
-          { id: uid(), date: "2026-09-05", text: "Trabalho para Frangos e Companhia", hours: 1, clientId: frangos ? frangos.id : null },
-          { id: uid(), date: "2026-09-12", text: "Trabalho para Frangos e Companhia", hours: 1, clientId: frangos ? frangos.id : null },
-          { id: uid(), date: "2026-09-06", text: "Trabalho para Escondidinho", hours: 1, clientId: escondidinho ? escondidinho.id : null },
-          { id: uid(), date: "2026-09-13", text: "Trabalho para Escondidinho", hours: 1, clientId: escondidinho ? escondidinho.id : null },
-        ];
-      },
-    },
-    {
-      id: "add-escondidinho-pendente-ago",
-      applyIncomes: (arr) => [
-        ...arr,
-        { id: uid(), desc: "Escondidinho", amount: 100, date: "2026-08-01", received: false },
-      ],
-    },
-    {
-      id: "link-clientes-antigos-receitas",
-      applyIncomes: (arr, clientsBase) => {
-        const norm = (s) => (s || "").trim().toLowerCase();
-        return arr.map((item) => {
-          if (item.clientId) return item;
-          const match = (clientsBase || []).find((c) => norm(c.name) === norm(item.desc));
-          if (!match) return item;
-          return { ...item, clientId: match.id, desc: "Pagamento" };
-        });
-      },
-    },
-    {
-      id: "link-clientes-antigos-despesas",
-      applyExpenses: (arr, clientsBase) => {
-        const norm = (s) => (s || "").trim().toLowerCase();
-        return arr.map((item) => {
-          if (item.clientId) return item;
-          const match = (clientsBase || []).find((c) => norm(item.desc).includes(norm(c.name)));
-          if (!match) return item;
-          return { ...item, clientId: match.id, desc: "Despesa associada" };
-        });
-      },
-    },
-  ];
-
   // Load persisted data on mount
   useEffect(() => {
     (async () => {
@@ -505,31 +394,17 @@ function FinancasApp() {
       } catch (e) {
         // key doesn't exist yet — fine, start empty
       } finally {
-        // Apply any migrations not yet run, on top of whatever data we have
+        // Sem nada guardado, começa pelos dados de partida. A lista `migrations`
+        // já não é usada por esta versão, mas continua a ser guardada: versões
+        // antigas da app (que aplicavam essas correções automáticas) veem-nas
+        // como já feitas e não as repetem por cima dos dados.
         const hasSaved = loadedIncomes !== null;
-        let eventsBase = hasSaved ? loadedEvents : SEED_DATA.events;
-        let incomesBase = hasSaved ? loadedIncomes : SEED_DATA.incomes;
-        let expensesBase = hasSaved ? loadedExpenses : SEED_DATA.expenses;
-        let notesBase = hasSaved ? loadedNotes : SEED_DATA.notes;
-        let clientsBase = hasSaved ? loadedClients : SEED_DATA.clients;
-
-        const appliedIds = hasSaved ? [...loadedMigrations] : [...SEED_DATA.migrations];
-        PENDING_MIGRATIONS.forEach((mig) => {
-          if (!appliedIds.includes(mig.id)) {
-            if (mig.applyClients) clientsBase = mig.applyClients(clientsBase);
-            if (mig.applyEvents) eventsBase = mig.applyEvents(eventsBase, clientsBase);
-            if (mig.applyIncomes) incomesBase = mig.applyIncomes(incomesBase, clientsBase);
-            if (mig.applyExpenses) expensesBase = mig.applyExpenses(expensesBase, clientsBase);
-            if (mig.applyNotes) notesBase = mig.applyNotes(notesBase);
-            appliedIds.push(mig.id);
-          }
-        });
-        setEvents(eventsBase);
-        setIncomes(incomesBase);
-        setExpenses(expensesBase);
-        setNotes(notesBase);
-        setClients(clientsBase);
-        setMigrations(appliedIds);
+        setEvents(hasSaved ? loadedEvents : SEED_DATA.events);
+        setIncomes(hasSaved ? loadedIncomes : SEED_DATA.incomes);
+        setExpenses(hasSaved ? loadedExpenses : SEED_DATA.expenses);
+        setNotes(hasSaved ? loadedNotes : SEED_DATA.notes);
+        setClients(hasSaved ? loadedClients : SEED_DATA.clients);
+        setMigrations(hasSaved ? loadedMigrations : SEED_DATA.migrations);
         setLoaded(true);
       }
     })();
@@ -882,11 +757,14 @@ function recurrenceLabel(value) {
   return RECURRENCE_OPTIONS.find((r) => r.value === value)?.label || "";
 }
 
+// Soma meses a uma data AAAA-MM-DD. Se o dia não existir no mês de destino
+// (31 → fevereiro), fica no último dia desse mês em vez de saltar para o seguinte.
 function addMonths(dateStr, months) {
   const [y, m, d] = dateStr.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCMonth(dt.getUTCMonth() + months);
-  return dt.toISOString().slice(0, 10);
+  const target = new Date(Date.UTC(y, m - 1 + months, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(d, lastDay));
+  return target.toISOString().slice(0, 10);
 }
 
 function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, trackStatus, statusLabels, clients, showClient }) {
@@ -1207,7 +1085,9 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
           Sem {title.toLowerCase()} para este período.
         </p>
       ) : (
-        <div style={{ border: `1px solid ${LINE}`, background: CARD }}>
+        // no telemóvel a tabela desliza dentro da caixa, sem arrastar a página
+        <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, background: CARD }}>
+        <div style={{ minWidth: hasClient ? 660 : 560 }}>
           <div
             style={{
               display: "grid",
@@ -1378,6 +1258,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             {hasStatus && <span />}
             <span />
           </div>
+        </div>
         </div>
       )}
     </div>
@@ -1971,15 +1852,18 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
       .map((row) => ({ ...row, mes: monthLabel(row.key), saldo: row.receitas - row.despesas }));
   }, [receivedIncomes, paidExpenses, filterYear, filterMonth]);
 
+  // agrupa pelo cliente quando a despesa tem um; senão pela descrição
   const expenseBreakdown = useMemo(() => {
     const map = {};
     paidExpenses.filter((e) => matchesFilter(e.date)).forEach((e) => {
-      map[e.desc] = (map[e.desc] || 0) + (Number(e.amount) || 0);
+      const client = e.clientId ? (clients || []).find((c) => c.id === e.clientId) : null;
+      const name = client ? client.name : e.desc;
+      map[name] = (map[name] || 0) + (Number(e.amount) || 0);
     });
     return Object.entries(map)
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
-  }, [paidExpenses, filterYear, filterMonth]);
+  }, [paidExpenses, clients, filterYear, filterMonth]);
 
   const clientSummary = useMemo(() => {
     const map = {};
@@ -2230,7 +2114,7 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
         <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20 }}>
           <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Onde vai o dinheiro</h3>
           <p style={{ margin: "0 0 14px", fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
-            despesas por descrição · mesmo período selecionado acima
+            despesas por cliente (ou descrição, se não tiver cliente) · mesmo período selecionado acima
           </p>
           <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
             <ResponsiveContainer width={200} height={200}>
@@ -2514,7 +2398,6 @@ function CalendarView({ events, setEvents, clients }) {
           >
             <option value="">sem cliente</option>
             {(clients || [])
-              .filter((c) => c.serviceType === "redes_sociais" || c.serviceType === "redes_sociais_site")
               .map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
@@ -2560,7 +2443,6 @@ function CalendarView({ events, setEvents, clients }) {
                       >
                         <option value="">sem cliente</option>
                         {(clients || [])
-                          .filter((c) => c.serviceType === "redes_sociais" || c.serviceType === "redes_sociais_site")
                           .map((c) => (
                             <option key={c.id} value={c.id}>{c.name}</option>
                           ))}
@@ -2621,3 +2503,6 @@ function CalendarView({ events, setEvents, clients }) {
     </div>
   );
 }
+
+// usadas pelos testes (App.test.jsx)
+export { parseNum, todayISO, addMonths, daysBetween };

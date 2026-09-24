@@ -7,4 +7,8 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 export default defineConfig(({ mode }) => ({
   plugins: [react(), ...(mode === "artifact" ? [viteSingleFile()] : [])],
   build: mode === "artifact" ? { outDir: "dist-artifact", chunkSizeWarningLimit: 2000 } : {},
+  test: {
+    environment: "jsdom",
+    setupFiles: "./src/test-setup.js",
+  },
 }));
