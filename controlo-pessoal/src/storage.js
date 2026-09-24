@@ -33,6 +33,19 @@ function localSet(key, value) {
 const pending = new Map();
 const writing = new Map();
 
+// Valores que este separador gravou há pouco, para não os tratar como
+// "alteração vinda de outro sítio" quando a db os devolver.
+const ownWrites = new Map();
+function rememberOwn(key, value) {
+  const list = ownWrites.get(key) || [];
+  list.push(value);
+  if (list.length > 20) list.shift();
+  ownWrites.set(key, list);
+}
+function isOwn(key, value) {
+  return (ownWrites.get(key) || []).includes(value);
+}
+
 async function flush(db, key) {
   try {
     while (pending.has(key)) {
@@ -63,6 +76,7 @@ if (!window.storage) {
     },
     async set(key, value) {
       const db = await dbPromise;
+      rememberOwn(key, value);
       if (!db) return localSet(key, value) ? { key, value } : null;
       pending.set(key, value);
       if (!writing.has(key)) {
@@ -70,6 +84,35 @@ if (!window.storage) {
       }
       await writing.get(key);
       return { key, value };
+    },
+    // Avisa quando o valor muda noutro separador ou aparelho. Devolve a
+    // função para deixar de ouvir.
+    subscribe(key, onChange) {
+      let stop = null;
+      let cancelled = false;
+      dbPromise.then((db) => {
+        if (cancelled) return;
+        if (db) {
+          stop = db.doc(`${COLLECTION}/${key}`).onSnapshot(
+            (snap) => {
+              if (snap.metadata && snap.metadata.hasPendingWrites) return;
+              const value = snap.exists ? snap.data()?.value : null;
+              if (typeof value === "string" && !isOwn(key, value)) onChange(value);
+            },
+            () => {}
+          );
+        } else {
+          const handler = (e) => {
+            if (e.key === key && typeof e.newValue === "string") onChange(e.newValue);
+          };
+          window.addEventListener("storage", handler);
+          stop = () => window.removeEventListener("storage", handler);
+        }
+      });
+      return () => {
+        cancelled = true;
+        if (stop) stop();
+      };
     },
   };
 }

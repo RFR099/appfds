@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail, Download, Upload, Clock } from "lucide-react";
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 
@@ -92,6 +92,10 @@ function DeleteButton({ onConfirm, question = "apagar?" }) {
 }
 
 const STORAGE_KEY = "controlo-pessoal-data";
+
+// Taxa horária da mão de obra e mês a partir do qual conta a margem de lucro.
+// Editáveis no Balanço; guardados junto com os dados.
+const DEFAULT_SETTINGS = { hourlyRate: 15, marginStart: "2026-09-01" };
 
 // Dados de partida — só usados quando ainda não há nada guardado. Espelham o
 // livro real a 24/09/2026 e já incluem o efeito de todas as migrações abaixo
@@ -359,6 +363,11 @@ function FinancasApp() {
   const [notes, setNotes] = useState(SEED_DATA.notes);
   const [clients, setClients] = useState(SEED_DATA.clients);
   const [migrations, setMigrations] = useState(SEED_DATA.migrations);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  // último valor igual ao que está guardado (lido ou gravado): evita regravar
+  // o que acabou de chegar de outro aparelho
+  const lastSynced = useRef(null);
+  const [remoteNotice, setRemoteNotice] = useState(false);
 
   // Migrações automáticas: correm só uma vez, mesmo entre utilizadores diferentes,
   // porque ficam registadas (por id) nos dados partilhados.
@@ -484,6 +493,8 @@ function FinancasApp() {
         const result = await window.storage.get(STORAGE_KEY, true);
         if (result && result.value) {
           const parsed = JSON.parse(result.value);
+          lastSynced.current = result.value;
+          if (parsed.settings) setSettings({ ...DEFAULT_SETTINGS, ...parsed.settings });
           loadedEvents = parsed.events || [];
           loadedIncomes = parsed.incomes || [];
           loadedExpenses = parsed.expenses || [];
@@ -524,19 +535,52 @@ function FinancasApp() {
     })();
   }, []);
 
+  // Alterações feitas noutro separador/aparelho aparecem aqui sem recarregar,
+  // para um separador antigo nunca gravar dados velhos por cima dos novos.
+  useEffect(() => {
+    if (!loaded || !window.storage.subscribe) return;
+    let noticeTimer = null;
+    const unsubscribe = window.storage.subscribe(STORAGE_KEY, (value) => {
+      if (value === lastSynced.current) return;
+      let parsed;
+      try {
+        parsed = JSON.parse(value);
+      } catch (e) {
+        return;
+      }
+      lastSynced.current = value;
+      setEvents(parsed.events || []);
+      setIncomes(parsed.incomes || []);
+      setExpenses(parsed.expenses || []);
+      setNotes(parsed.notes || []);
+      setClients(parsed.clients || []);
+      setMigrations(parsed.migrations || []);
+      setSettings({ ...DEFAULT_SETTINGS, ...(parsed.settings || {}) });
+      setRemoteNotice(true);
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => setRemoteNotice(false), 4000);
+    });
+    return () => {
+      clearTimeout(noticeTimer);
+      unsubscribe();
+    };
+  }, [loaded]);
+
   // Persist whenever data changes (after initial load)
   useEffect(() => {
     if (!loaded) return;
+    const payload = JSON.stringify({ events, incomes, expenses, notes, clients, migrations, settings });
+    if (payload === lastSynced.current) return;
+    lastSynced.current = payload;
     (async () => {
       try {
-        const payload = JSON.stringify({ events, incomes, expenses, notes, clients, migrations });
         const res = await window.storage.set(STORAGE_KEY, payload, true);
         setSaveError(!res);
       } catch (e) {
         setSaveError(true);
       }
     })();
-  }, [events, incomes, expenses, notes, clients, migrations, loaded]);
+  }, [events, incomes, expenses, notes, clients, migrations, settings, loaded]);
 
   const totalIncome = useMemo(() => incomes.filter((i) => i.received !== false).reduce((s, i) => s + (Number(i.amount) || 0), 0), [incomes]);
   const totalExpense = useMemo(() => expenses.filter((e) => e.received !== false).reduce((s, e) => s + (Number(e.amount) || 0), 0), [expenses]);
@@ -555,7 +599,7 @@ function FinancasApp() {
   const [pendingImport, setPendingImport] = useState(null);
 
   async function exportBackup() {
-    const data = JSON.stringify({ app: "innovatweb-financas", exportedAt: new Date().toISOString(), events, incomes, expenses, notes, clients, migrations }, null, 2);
+    const data = JSON.stringify({ app: "innovatweb-financas", exportedAt: new Date().toISOString(), events, incomes, expenses, notes, clients, migrations, settings }, null, 2);
     const filename = `innovatweb-financas-${todayISO()}.json`;
     try {
       const downloads = window.claude && window.claude.use ? await window.claude.use("downloads") : null;
@@ -600,6 +644,7 @@ function FinancasApp() {
     setNotes(d.notes || []);
     setClients(d.clients || []);
     setMigrations(d.migrations || SEED_DATA.migrations);
+    setSettings({ ...DEFAULT_SETTINGS, ...(d.settings || {}) });
     setBackupMsg({ ok: true, text: `Dados repostos a partir de ${pendingImport.name}.` });
     setPendingImport(null);
   }
@@ -690,7 +735,7 @@ function FinancasApp() {
       ) : (
         <>
           {tab === "calendario" && <CalendarView events={events} setEvents={setEvents} clients={clients} />}
-          {tab === "balanco" && <BalancoView incomes={incomes} expenses={expenses} events={events} clients={clients} />}
+          {tab === "balanco" && <BalancoView incomes={incomes} expenses={expenses} events={events} clients={clients} settings={settings} setSettings={setSettings} />}
           {tab === "receitas" && (
             <LedgerView
               title="Receitas"
@@ -724,6 +769,15 @@ function FinancasApp() {
         <p style={{ marginTop: 20, fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>
           Não foi possível guardar as alterações. Tenta novamente.
         </p>
+      )}
+
+      {remoteNotice && (
+        <div
+          role="status"
+          style={{ position: "fixed", bottom: "calc(16px + env(safe-area-inset-bottom, 0px))", left: "50%", transform: "translateX(-50%)", zIndex: 20, padding: "8px 14px", background: HILITE, border: `1px solid ${GOLD}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}
+        >
+          atualizado com alterações feitas noutro aparelho
+        </div>
       )}
 
       <div style={{ marginTop: 40, paddingTop: 16, borderTop: `1px solid ${LINE}`, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1834,9 +1888,34 @@ function monthLabel(key) {
 }
 
 const PIE_COLORS = ["#E2604A", "#D8A73A", "#3FB87F", "#5B8DEF", "#B07CC6", "#4FBDC0"];
-const HOURLY_RATE = 15;
+function BalancoView({ incomes, expenses, events, clients, settings, setSettings }) {
+  const HOURLY_RATE = Number(settings.hourlyRate) || 0;
+  const MARGIN_START = settings.marginStart;
+  const [marginYear, marginMonth] = MARGIN_START.split("-").map(Number);
+  const [editingSettings, setEditingSettings] = useState(false);
+  const [settingsForm, setSettingsForm] = useState(null);
+  const [settingsError, setSettingsError] = useState("");
 
-function BalancoView({ incomes, expenses, events, clients }) {
+  function startEditSettings() {
+    setSettingsForm({ hourlyRate: String(settings.hourlyRate).replace(".", ","), marginStart: MARGIN_START.slice(0, 7) });
+    setSettingsError("");
+    setEditingSettings(true);
+  }
+
+  function saveSettings() {
+    const rate = parseNum(settingsForm.hourlyRate);
+    if (isNaN(rate) || rate < 0) {
+      setSettingsError("Escreve uma taxa válida (ex: 15 ou 17,50).");
+      return;
+    }
+    if (!/^\d{4}-\d{2}$/.test(settingsForm.marginStart)) {
+      setSettingsError("Escolhe o mês de início.");
+      return;
+    }
+    setSettings({ ...settings, hourlyRate: rate, marginStart: `${settingsForm.marginStart}-01` });
+    setEditingSettings(false);
+  }
+
   const [filterYear, setFilterYear] = useState("geral");
   const [filterMonth, setFilterMonth] = useState("geral");
 
@@ -1863,7 +1942,6 @@ function BalancoView({ incomes, expenses, events, clients }) {
 
   // A % de lucro só considera dados a partir deste mês — meses anteriores
   // continuam a contar para o saldo e para o gráfico, mas não para a margem.
-  const MARGIN_START = "2026-09-01";
   const marginIncomes = receivedIncomes.filter((i) => i.date >= MARGIN_START);
   const marginExpenses = paidExpenses.filter((e) => e.date >= MARGIN_START);
   const marginEvents = events.filter((e) => e.date >= MARGIN_START);
@@ -1926,7 +2004,7 @@ function BalancoView({ incomes, expenses, events, clients }) {
         return { ...row, liquido, lucro: liquido - row.horas * HOURLY_RATE };
       })
       .sort((a, b) => b.lucro - a.lucro);
-  }, [clients, receivedIncomes, paidExpenses, events, filterYear, filterMonth]);
+  }, [clients, receivedIncomes, paidExpenses, events, filterYear, filterMonth, HOURLY_RATE]);
 
   // O que está por receber, agrupado por cliente (independente dos filtros:
   // uma dívida antiga continua a ser dívida).
@@ -2018,7 +2096,7 @@ function BalancoView({ incomes, expenses, events, clients }) {
       {/* Profit margin block */}
       <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 8, display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
         <div>
-          <div style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, marginBottom: 4 }}>margem de lucro (desde set. 2026)</div>
+          <div style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, marginBottom: 4 }}>margem de lucro (desde {MONTHS_ABBR[marginMonth - 1].toLowerCase()}. {marginYear})</div>
           {hasMarginData ? (
             <div style={{ fontSize: 34, fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace", color: margem >= 0 ? GREEN : RED }}>
               {margem.toFixed(1)}%
@@ -2029,14 +2107,56 @@ function BalancoView({ incomes, expenses, events, clients }) {
         </div>
         <div style={{ height: 40, width: 1, background: LINE }} />
         <div style={{ display: "flex", gap: 24, flexWrap: "wrap", flex: 1 }}>
-          <MiniStat label="horas (set. em diante)" value={`${totalHours.toFixed(1)} h`} />
+          <MiniStat label={`horas (${MONTHS_ABBR[marginMonth - 1].toLowerCase()}. em diante)`} value={`${totalHours.toFixed(1)} h`} />
           <MiniStat label={`mão de obra (${HOURLY_RATE}€/h)`} value={fmtEUR(laborCost)} color={RED} />
-          <MiniStat label="lucro real (set. em diante)" value={fmtEUR(lucro)} color={lucro >= 0 ? GREEN : RED} />
+          <MiniStat label={`lucro real (${MONTHS_ABBR[marginMonth - 1].toLowerCase()}. em diante)`} value={fmtEUR(lucro)} color={lucro >= 0 ? GREEN : RED} />
         </div>
       </div>
-      <p style={{ marginTop: 0, marginBottom: 24, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
-        a margem só conta receitas, despesas e horas a partir de setembro de 2026 — meses anteriores contam só para o saldo e o gráfico
-      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", marginBottom: 24 }}>
+        <p style={{ margin: 0, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+          a margem só conta receitas, despesas e horas a partir de {MONTHS_PT[marginMonth - 1].toLowerCase()} de {marginYear} — meses anteriores contam só para o saldo e o gráfico
+        </p>
+        {!editingSettings && (
+          <button
+            onClick={startEditSettings}
+            style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, color: GOLD, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <Pencil size={11} /> mudar taxa ou mês
+          </button>
+        )}
+      </div>
+      {editingSettings && (
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 12, border: `1px solid ${GOLD}`, background: HILITE, margin: "-12px 0 24px" }}>
+          <div>
+            <label htmlFor="taxa-horaria" style={fieldLabelStyle}>taxa horária (€/h)</label>
+            <input
+              id="taxa-horaria"
+              value={settingsForm.hourlyRate}
+              onChange={(e) => setSettingsForm({ ...settingsForm, hourlyRate: e.target.value })}
+              type="text"
+              inputMode="decimal"
+              style={{ ...inputStyle, width: 110 }}
+            />
+          </div>
+          <div>
+            <label htmlFor="inicio-margem" style={fieldLabelStyle}>margem conta a partir de</label>
+            <input
+              id="inicio-margem"
+              value={settingsForm.marginStart}
+              onChange={(e) => setSettingsForm({ ...settingsForm, marginStart: e.target.value })}
+              type="month"
+              style={{ ...inputStyle, width: 170 }}
+            />
+          </div>
+          <button onClick={saveSettings} style={{ padding: "9px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            guardar
+          </button>
+          <button onClick={() => setEditingSettings(false)} style={{ padding: "9px 14px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            cancelar
+          </button>
+          {settingsError && <p style={{ width: "100%", margin: 0, fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{settingsError}</p>}
+        </div>
+      )}
 
       {/* Monthly comparison chart */}
       <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: "20px 20px 8px", marginBottom: 28 }}>
