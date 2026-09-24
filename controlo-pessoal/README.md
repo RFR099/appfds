@@ -1,7 +1,7 @@
 # controlo-pessoal
 
-App de controlo empresarial (Innovatweb): finanças (calendário, balanço,
-receitas, despesas, notas, clientes) e redes sociais.
+App de controlo financeiro (Innovatweb): calendário, balanço, receitas,
+despesas, notas e clientes.
 
 Independente do resto do repositório (`fds-backend` / `frontend`).
 
