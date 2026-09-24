@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail, Download, Upload, Clock } from "lucide-react";
+import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail, Download, Upload, Clock, Search, Check, Settings } from "lucide-react";
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 
 const MONTHS_ABBR = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
@@ -45,6 +45,47 @@ function parseNum(str) {
     s = s.replace(/\./g, "");
   }
   return Number(s);
+}
+
+// Guarda um ficheiro no computador de quem usa a app. Dentro do claude.ai
+// passa pela capability "downloads" (pede confirmação); fora, link normal.
+async function saveFile(filename, data, mime) {
+  try {
+    const downloads = window.claude && window.claude.use ? await window.claude.use("downloads") : null;
+    if (downloads) {
+      await downloads.save({ filename, data });
+    } else {
+      const url = URL.createObjectURL(new Blob([data], { type: mime }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+    return { ok: true, text: `Ficheiro guardado: ${filename}` };
+  } catch (e) {
+    return { ok: false, text: e && e.code === "declined" ? "Cancelado." : "Não foi possível guardar o ficheiro." };
+  }
+}
+
+// true em ecrãs estreitos (telemóvel): as tabelas passam a cartões
+function useIsNarrow(maxWidth = 640) {
+  const query = `(max-width: ${maxWidth}px)`;
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && !!window.matchMedia && window.matchMedia(query).matches);
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia(query);
+    const onChange = () => setNarrow(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return narrow;
+}
+
+// compara sem acentos nem maiúsculas ("Café" encontra "cafe")
+function normalizeText(s) {
+  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
 // Apagar pede confirmação no próprio sítio: o primeiro clique mostra
@@ -93,9 +134,10 @@ function DeleteButton({ onConfirm, question = "apagar?" }) {
 
 const STORAGE_KEY = "controlo-pessoal-data";
 
-// Taxa horária da mão de obra e mês a partir do qual conta a margem de lucro.
-// Editáveis no Balanço; guardados junto com os dados.
-const DEFAULT_SETTINGS = { hourlyRate: 15, marginStart: "2026-09-01" };
+// Definições editáveis no Balanço e guardadas junto com os dados: taxa horária
+// da mão de obra, mês a partir do qual conta a margem, % do saldo a pôr de
+// parte para impostos e objetivo de faturação mensal.
+const DEFAULT_SETTINGS = { hourlyRate: 15, marginStart: "2026-09-01", taxReserve: 25, monthlyGoal: 1000 };
 
 // Dados de partida — só usados quando ainda não há nada guardado. Espelham o
 // livro real a 24/09/2026 e já incluem o efeito das correções automáticas
@@ -475,24 +517,13 @@ function FinancasApp() {
 
   async function exportBackup() {
     const data = JSON.stringify({ app: "innovatweb-financas", exportedAt: new Date().toISOString(), events, incomes, expenses, notes, clients, migrations, settings }, null, 2);
-    const filename = `innovatweb-financas-${todayISO()}.json`;
-    try {
-      const downloads = window.claude && window.claude.use ? await window.claude.use("downloads") : null;
-      if (downloads) {
-        await downloads.save({ filename, data });
-      } else {
-        const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-      }
-      setBackupMsg({ ok: true, text: `Cópia guardada: ${filename}` });
-    } catch (e) {
-      setBackupMsg({ ok: false, text: e && e.code === "declined" ? "Cópia cancelada." : "Não foi possível guardar a cópia." });
-    }
+    setBackupMsg(await saveFile(`innovatweb-financas-${todayISO()}.json`, data, "application/json"));
   }
+
+  // receitas pendentes cuja data já passou (número no separador Balanço)
+  const overdueCount = incomes.filter((i) => i.received === false && i.date < todayISO()).length;
+  const [query, setQuery] = useState("");
+  const searching = query.trim().length >= 2;
 
   function readBackup(file) {
     if (!file) return;
@@ -548,11 +579,12 @@ function FinancasApp() {
             ["notas", "Notas", <NotebookPen size={14} />],
             ["clientes", "Clientes", <Users size={14} />],
           ].map(([key, label, icon]) => {
-            const openNotesCount = notes.filter((n) => !n.closed).length;
+            const badge = key === "notas" ? notes.filter((n) => !n.closed).length : key === "balanco" ? overdueCount : 0;
+            const badgeTitle = key === "notas" ? `${badge} nota(s) por fechar` : `${badge} pagamento(s) em atraso`;
             return (
               <button
                 key={key}
-                onClick={() => setTab(key)}
+                onClick={() => { setTab(key); setQuery(""); }}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -563,15 +595,17 @@ function FinancasApp() {
                   padding: "8px 10px",
                   fontFamily: "'Manrope', sans-serif",
                   fontSize: 13,
-                  color: tab === key ? INK : INK_SOFT,
-                  fontWeight: tab === key ? 600 : 400,
+                  color: tab === key && !searching ? INK : INK_SOFT,
+                  fontWeight: tab === key && !searching ? 600 : 400,
                   textAlign: "left",
                   position: "relative",
                 }}
               >
                 {icon} {label}
-                {key === "notas" && openNotesCount > 0 && (
+                {badge > 0 && (
                   <span
+                    title={badgeTitle}
+                    aria-label={badgeTitle}
                     style={{
                       marginLeft: 2,
                       minWidth: 16,
@@ -588,7 +622,7 @@ function FinancasApp() {
                       lineHeight: 1,
                     }}
                   >
-                    {openNotesCount}
+                    {badge}
                   </span>
                 )}
               </button>
@@ -604,13 +638,37 @@ function FinancasApp() {
         </div>
       </div>
 
+      <div style={{ position: "relative", marginBottom: 20 }}>
+        <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
+        <input
+          id="pesquisa"
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+          placeholder="Pesquisar clientes, receitas, despesas, notas…"
+          aria-label="Pesquisar"
+          style={{ width: "100%", padding: "9px 10px 9px 32px", border: `1px solid ${searching ? GOLD : LINE}`, background: CARD, fontSize: 13, color: INK }}
+        />
+      </div>
+
       {/* Content */}
       {!loaded ? (
         <p style={{ color: INK_SOFT, fontSize: 14 }}>A carregar os teus dados…</p>
+      ) : searching ? (
+        <SearchResults
+          query={query}
+          incomes={incomes}
+          expenses={expenses}
+          notes={notes}
+          events={events}
+          clients={clients}
+          onOpen={(t) => { setTab(t); setQuery(""); }}
+        />
       ) : (
         <>
           {tab === "calendario" && <CalendarView events={events} setEvents={setEvents} clients={clients} />}
-          {tab === "balanco" && <BalancoView incomes={incomes} expenses={expenses} events={events} clients={clients} settings={settings} setSettings={setSettings} />}
+          {tab === "balanco" && <BalancoView incomes={incomes} setIncomes={setIncomes} expenses={expenses} events={events} clients={clients} settings={settings} setSettings={setSettings} />}
           {tab === "receitas" && (
             <LedgerView
               title="Receitas"
@@ -727,6 +785,92 @@ export default function App() {
   );
 }
 
+// Resultados da pesquisa, agrupados; clicar num abre o separador respetivo.
+function SearchResults({ query, incomes, expenses, notes, events, clients, onOpen }) {
+  const q = normalizeText(query.trim());
+  const nameOf = (id) => ((clients || []).find((c) => c.id === id) || {}).name || "";
+  const fmtDate = (d) => d.split("-").reverse().join("/");
+  const hit = (...fields) => fields.some((f) => normalizeText(f).includes(q));
+
+  const groups = [
+    {
+      tab: "receitas",
+      label: "Receitas",
+      rows: incomes
+        .filter((i) => hit(i.desc, nameOf(i.clientId), String(i.amount)))
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((i) => ({ id: i.id, date: fmtDate(i.date), main: nameOf(i.clientId) || i.desc, sub: nameOf(i.clientId) ? i.desc : "", value: fmtEUR(i.amount), color: GREEN, tag: i.received === false ? "pendente" : "" })),
+    },
+    {
+      tab: "despesas",
+      label: "Despesas",
+      rows: expenses
+        .filter((e) => hit(e.desc, nameOf(e.clientId), String(e.amount)))
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((e) => ({ id: e.id, date: fmtDate(e.date), main: nameOf(e.clientId) || e.desc, sub: nameOf(e.clientId) ? e.desc : "", value: fmtEUR(e.amount), color: RED, tag: e.received === false ? "não pago" : "" })),
+    },
+    {
+      tab: "clientes",
+      label: "Clientes",
+      rows: (clients || [])
+        .filter((c) => hit(c.name, c.note, c.email, c.phone))
+        .map((c) => ({ id: c.id, date: "", main: c.name, sub: [c.phone, c.email, c.note].filter(Boolean).join(" · "), value: "", color: INK })),
+    },
+    {
+      tab: "notas",
+      label: "Notas",
+      rows: notes
+        .filter((n) => hit(n.text))
+        .map((n) => ({ id: n.id, date: fmtDate(n.date), main: n.text, sub: n.closed ? "fechada" : "", value: "", color: INK })),
+    },
+    {
+      tab: "calendario",
+      label: "Calendário",
+      rows: events
+        .filter((e) => hit(e.text, nameOf(e.clientId)))
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((e) => ({ id: e.id, date: fmtDate(e.date), main: e.text, sub: nameOf(e.clientId), value: e.hours ? `${e.hours} h` : "", color: GOLD })),
+    },
+  ].filter((g) => g.rows.length > 0);
+
+  if (groups.length === 0) {
+    return <p style={{ color: INK_SOFT, fontSize: 14 }}>Nada encontrado para “{query.trim()}”.</p>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {groups.map((g) => (
+        <section key={g.tab}>
+          <h3 style={{ margin: "0 0 8px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 500, color: INK_SOFT }}>
+            {g.label} · {g.rows.length}
+          </h3>
+          <div style={{ border: `1px solid ${LINE}`, background: CARD }}>
+            {g.rows.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => onOpen(g.tab)}
+                className="row-hover"
+                style={{ display: "flex", width: "100%", gap: 12, alignItems: "baseline", justifyContent: "space-between", padding: "10px 12px", background: "none", border: "none", borderBottom: `1px solid ${LINE}`, color: INK, textAlign: "left", fontFamily: "'Manrope', sans-serif" }}
+              >
+                <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                  <span style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{r.main}</span>
+                  {(r.date || r.sub || r.tag) && (
+                    <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                      {[r.date, r.sub].filter(Boolean).join(" · ")}
+                      {r.tag && <span style={{ color: RED }}>{r.date || r.sub ? " · " : ""}{r.tag}</span>}
+                    </span>
+                  )}
+                </span>
+                {r.value && <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: r.color, whiteSpace: "nowrap" }}>{r.value}</span>}
+              </button>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function StatCell({ label, value, color, icon, border, strong }) {
   return (
     <div
@@ -767,7 +911,55 @@ function addMonths(dateStr, months) {
   return target.toISOString().slice(0, 10);
 }
 
+// Mensal: mantém sempre uma ocorrência pendente um mês à frente da mais recente
+// já existente na série (mesmo cliente + descrição). Corre ao adicionar (mesmo que
+// a atual ainda não esteja paga) e sempre que se marca uma ocorrência como recebida
+// — nesse caso avança a folga mais um mês.
+function ensureMonthlyBuffer(list, base) {
+  if (base.recurrence !== "mensal") return list;
+  const series = list.filter(
+    (i) => i.desc === base.desc && (i.clientId || null) === (base.clientId || null) && i.recurrence === "mensal"
+  );
+  const maxDate = series.reduce((max, i) => (i.date > max ? i.date : max), base.date);
+  const nextDate = addMonths(maxDate, 1);
+  if (series.some((i) => i.date === nextDate)) return list;
+  return [
+    ...list,
+    { id: uid(), desc: base.desc, amount: base.amount, date: nextDate, received: false, clientId: base.clientId || null, recurrence: base.recurrence },
+  ];
+}
+
+// Anual: quando fica marcada como recebida, gera a ocorrência seguinte já pendente,
+// com um mês de adiantamento.
+function maybeSpawnNextAnnual(list, base) {
+  if (base.recurrence !== "anual") return list;
+  const nextDate = addMonths(base.date, 1);
+  const already = list.some(
+    (i) =>
+      i.desc === base.desc &&
+      (i.clientId || null) === (base.clientId || null) &&
+      i.recurrence === base.recurrence &&
+      i.date === nextDate
+  );
+  if (already) return list;
+  return [
+    ...list,
+    { id: uid(), desc: base.desc, amount: base.amount, date: nextDate, received: false, clientId: base.clientId || null, recurrence: base.recurrence },
+  ];
+}
+
+// Marca uma receita como recebida e cria a ocorrência seguinte, se for recorrente.
+function markReceived(list, id) {
+  let next = list.map((i) => (i.id === id ? { ...i, received: true } : i));
+  const marked = next.find((i) => i.id === id);
+  if (!marked) return list;
+  next = ensureMonthlyBuffer(next, marked);
+  return maybeSpawnNextAnnual(next, marked);
+}
+
 function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, trackStatus, statusLabels, clients, showClient }) {
+  const narrow = useIsNarrow();
+  const [csvMsg, setCsvMsg] = useState(null);
   const hasStatus = !!(trackPaid || trackStatus);
   const hasClient = !!(trackPaid || showClient);
   const labels = statusLabels || { yes: "recebido", no: "pendente" };
@@ -814,45 +1006,6 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
     return c ? c.name : "";
   }
 
-  // Mensal: mantém sempre uma ocorrência pendente um mês à frente da mais recente
-  // já existente na série (mesmo cliente + descrição). Corre ao adicionar (mesmo que
-  // a atual ainda não esteja paga) e sempre que se marca uma ocorrência como recebida
-  // — nesse caso avança a folga mais um mês.
-  function ensureMonthlyBuffer(list, base) {
-    if (!trackPaid) return list;
-    if (base.recurrence !== "mensal") return list;
-    const series = list.filter(
-      (i) => i.desc === base.desc && (i.clientId || null) === (base.clientId || null) && i.recurrence === "mensal"
-    );
-    const maxDate = series.reduce((max, i) => (i.date > max ? i.date : max), base.date);
-    const nextDate = addMonths(maxDate, 1);
-    if (series.some((i) => i.date === nextDate)) return list;
-    return [
-      ...list,
-      { id: uid(), desc: base.desc, amount: base.amount, date: nextDate, received: false, clientId: base.clientId || null, recurrence: base.recurrence },
-    ];
-  }
-
-  // Anual: quando fica marcada como recebida, gera a ocorrência seguinte já pendente,
-  // com um mês de adiantamento.
-  function maybeSpawnNextAnnual(list, base) {
-    if (!trackPaid) return list;
-    if (base.recurrence !== "anual") return list;
-    const nextDate = addMonths(base.date, 1);
-    const already = list.some(
-      (i) =>
-        i.desc === base.desc &&
-        (i.clientId || null) === (base.clientId || null) &&
-        i.recurrence === base.recurrence &&
-        i.date === nextDate
-    );
-    if (already) return list;
-    return [
-      ...list,
-      { id: uid(), desc: base.desc, amount: base.amount, date: nextDate, received: false, clientId: base.clientId || null, recurrence: base.recurrence },
-    ];
-  }
-
   function addItem() {
     const finalDesc = desc.trim() || (hasClient ? "Pagamento" : "");
     if (!finalDesc) {
@@ -874,8 +1027,10 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
       recurrence: hasStatus ? recurrence : "compra_unica",
     };
     let next = [...items, newItem];
-    next = ensureMonthlyBuffer(next, newItem);
-    if (newItem.received !== false) next = maybeSpawnNextAnnual(next, newItem);
+    if (trackPaid) {
+      next = ensureMonthlyBuffer(next, newItem);
+      if (newItem.received !== false) next = maybeSpawnNextAnnual(next, newItem);
+    }
     setItems(next);
     setDesc("");
     setAmount("");
@@ -891,7 +1046,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
   function toggleReceived(id) {
     let next = items.map((i) => (i.id === id ? { ...i, received: !i.received } : i));
     const toggled = next.find((i) => i.id === id);
-    if (toggled && toggled.received !== false) {
+    if (trackPaid && toggled && toggled.received !== false) {
       next = ensureMonthlyBuffer(next, toggled);
       next = maybeSpawnNextAnnual(next, toggled);
     }
@@ -932,11 +1087,55 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
         : i
     );
     const edited = next.find((i) => i.id === id);
-    next = ensureMonthlyBuffer(next, edited);
-    if (edited && edited.received !== false) next = maybeSpawnNextAnnual(next, edited);
+    if (trackPaid) {
+      next = ensureMonthlyBuffer(next, edited);
+      if (edited && edited.received !== false) next = maybeSpawnNextAnnual(next, edited);
+    }
     setItems(next);
     setEditingId(null);
     setEditForm(null);
+  }
+
+  // CSV para o contabilista: o que está filtrado, do mais antigo para o mais recente.
+  // ";" e vírgula decimal, como o Excel em português espera.
+  async function exportCsv() {
+    const esc = (v) => {
+      const t = String(v ?? "");
+      return /[";\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+    const header = ["data", ...(hasClient ? ["cliente"] : []), hasClient ? "pagamento" : "descrição", "valor", ...(hasStatus ? ["estado", "recorrência"] : [])];
+    const rows = [...filtered]
+      .sort((a, b) => (a.date < b.date ? -1 : 1))
+      .map((i) => [
+        i.date.split("-").reverse().join("/"),
+        ...(hasClient ? [clientName(i.clientId)] : []),
+        i.desc,
+        (Number(i.amount) || 0).toFixed(2).replace(".", ","),
+        ...(hasStatus ? [i.received === false ? labels.no : labels.yes, recurrenceLabel(i.recurrence || "compra_unica")] : []),
+      ]);
+    const csv = "\ufeff" + [header, ...rows].map((r) => r.map(esc).join(";")).join("\r\n");
+    const period =
+      filterYear !== "geral" ? (filterMonth !== "geral" ? `${filterYear}-${filterMonth}` : filterYear) : filterMonth !== "geral" ? `mes-${filterMonth}` : "tudo";
+    setCsvMsg(await saveFile(`innovatweb-${normalizeText(title)}-${period}.csv`, csv, "text/csv"));
+  }
+
+  function renderStatus(item) {
+    return (
+      <button
+        onClick={() => toggleReceived(item.id)}
+        style={{
+          padding: "3px 8px",
+          background: "none",
+          border: `1px solid ${item.received === false ? RED : GREEN}`,
+          color: item.received === false ? RED : GREEN,
+          fontSize: 10,
+          fontFamily: "'IBM Plex Mono', monospace",
+          borderRadius: 2,
+        }}
+      >
+        {item.received === false ? labels.no : labels.yes}
+      </button>
+    );
   }
 
   const gridCols = hasClient
@@ -1073,12 +1272,23 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             Geral
           </button>
         )}
+        <button
+          onClick={exportCsv}
+          disabled={filtered.length === 0}
+          title="Exportar o que está filtrado para Excel (CSV)"
+          style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 12, color: INK, fontFamily: "'IBM Plex Mono', monospace" }}
+        >
+          <Download size={12} /> CSV
+        </button>
         {hasStatus && totalPending > 0 && (
           <span style={{ marginLeft: "auto", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: RED }}>
             {labels.no}: {fmtEUR(totalPending)}
           </span>
         )}
       </div>
+      {csvMsg && (
+        <p style={{ margin: "-8px 0 14px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: csvMsg.ok ? GREEN : RED }}>{csvMsg.text}</p>
+      )}
 
       {sorted.length === 0 ? (
         <p style={{ color: INK_SOFT, fontSize: 14, padding: "20px 0", borderTop: `1px solid ${LINE}` }}>
@@ -1087,7 +1297,8 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
       ) : (
         // no telemóvel a tabela desliza dentro da caixa, sem arrastar a página
         <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, background: CARD }}>
-        <div style={{ minWidth: hasClient ? 660 : 560 }}>
+        <div style={{ minWidth: narrow ? 0 : hasClient ? 660 : 560 }}>
+          {!narrow && (
           <div
             style={{
               display: "grid",
@@ -1107,6 +1318,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             {hasStatus && <span style={{ textAlign: "center" }}>recorrência</span>}
             <span />
           </div>
+          )}
           {sorted.map((item) =>
             editingId === item.id ? (
               <div key={item.id} style={{ padding: "12px", borderBottom: `1px solid ${LINE}`, background: HILITE }}>
@@ -1172,6 +1384,29 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
                   </button>
                 </div>
               </div>
+            ) : narrow ? (
+              <div key={item.id} className="row-hover" style={{ padding: "12px", borderBottom: `1px solid ${LINE}`, display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{(hasClient && clientName(item.clientId)) || item.desc}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: accent, fontWeight: 700, fontSize: 15, whiteSpace: "nowrap" }}>
+                    {fmtEUR(item.amount)}
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                    {item.date.split("-").reverse().join("/")}
+                    {hasClient && clientName(item.clientId) ? ` · ${item.desc}` : ""}
+                    {item.recurrence && item.recurrence !== "compra_unica" ? ` · ${recurrenceLabel(item.recurrence).toLowerCase()}` : ""}
+                  </span>
+                  <span style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                    {hasStatus && renderStatus(item)}
+                    <button onClick={() => startEdit(item)} style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }} aria-label="editar">
+                      <Pencil size={14} />
+                    </button>
+                    <DeleteButton onConfirm={() => removeItem(item.id)} />
+                  </span>
+                </div>
+              </div>
             ) : (
             <div
               key={item.id}
@@ -1197,24 +1432,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
               <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: accent, fontWeight: 600 }}>
                 {fmtEUR(item.amount)}
               </span>
-              {hasStatus && (
-                <span style={{ textAlign: "center" }}>
-                  <button
-                    onClick={() => toggleReceived(item.id)}
-                    style={{
-                      padding: "3px 8px",
-                      background: "none",
-                      border: `1px solid ${item.received === false ? RED : GREEN}`,
-                      color: item.received === false ? RED : GREEN,
-                      fontSize: 10,
-                      fontFamily: "'IBM Plex Mono', monospace",
-                      borderRadius: 2,
-                    }}
-                  >
-                    {item.received === false ? labels.no : labels.yes}
-                  </button>
-                </span>
-              )}
+              {hasStatus && <span style={{ textAlign: "center" }}>{renderStatus(item)}</span>}
               {hasStatus && (
                 <span
                   style={{
@@ -1240,6 +1458,12 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             </div>
             )
           )}
+          {narrow ? (
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", fontSize: 13, fontWeight: 700, background: HILITE }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, alignSelf: "center" }}>{hasStatus ? `total ${labels.yes}` : "total"}</span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: accent }}>{fmtEUR(total)}</span>
+            </div>
+          ) : (
           <div
             style={{
               display: "grid",
@@ -1258,6 +1482,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             {hasStatus && <span />}
             <span />
           </div>
+          )}
         </div>
         </div>
       )}
@@ -1769,7 +1994,7 @@ function monthLabel(key) {
 }
 
 const PIE_COLORS = ["#E2604A", "#D8A73A", "#3FB87F", "#5B8DEF", "#B07CC6", "#4FBDC0"];
-function BalancoView({ incomes, expenses, events, clients, settings, setSettings }) {
+function BalancoView({ incomes, setIncomes, expenses, events, clients, settings, setSettings }) {
   const HOURLY_RATE = Number(settings.hourlyRate) || 0;
   const MARGIN_START = settings.marginStart;
   const [marginYear, marginMonth] = MARGIN_START.split("-").map(Number);
@@ -1778,7 +2003,12 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
   const [settingsError, setSettingsError] = useState("");
 
   function startEditSettings() {
-    setSettingsForm({ hourlyRate: String(settings.hourlyRate).replace(".", ","), marginStart: MARGIN_START.slice(0, 7) });
+    setSettingsForm({
+      hourlyRate: String(settings.hourlyRate).replace(".", ","),
+      marginStart: MARGIN_START.slice(0, 7),
+      taxReserve: String(settings.taxReserve).replace(".", ","),
+      monthlyGoal: String(settings.monthlyGoal).replace(".", ","),
+    });
     setSettingsError("");
     setEditingSettings(true);
   }
@@ -1793,7 +2023,17 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
       setSettingsError("Escolhe o mês de início.");
       return;
     }
-    setSettings({ ...settings, hourlyRate: rate, marginStart: `${settingsForm.marginStart}-01` });
+    const tax = parseNum(settingsForm.taxReserve);
+    if (isNaN(tax) || tax < 0 || tax > 100) {
+      setSettingsError("A reserva para impostos é uma percentagem entre 0 e 100.");
+      return;
+    }
+    const goal = parseNum(settingsForm.monthlyGoal);
+    if (isNaN(goal) || goal < 0) {
+      setSettingsError("Escreve um objetivo mensal válido (ex: 1.000).");
+      return;
+    }
+    setSettings({ ...settings, hourlyRate: rate, marginStart: `${settingsForm.marginStart}-01`, taxReserve: tax, monthlyGoal: goal });
     setEditingSettings(false);
   }
 
@@ -1899,6 +2139,20 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
   const totalUnpaid = unpaidExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
   const forecast = balance + totalPending - totalUnpaid;
 
+  const taxPct = Number(settings.taxReserve) || 0;
+  const taxAmount = balance > 0 ? (balance * taxPct) / 100 : 0;
+
+  // objetivo do mês corrente, contra o que já foi recebido este mês
+  const goal = Number(settings.monthlyGoal) || 0;
+  const thisMonth = todayISO().slice(0, 7);
+  const lastMonth = addMonths(`${thisMonth}-01`, -1).slice(0, 7);
+  const receivedIn = (m) => receivedIncomes.filter((i) => i.date.slice(0, 7) === m).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const thisMonthTotal = receivedIn(thisMonth);
+  const lastMonthTotal = receivedIn(lastMonth);
+  const pendingThisMonth = pendingIncomes.filter((i) => i.date.slice(0, 7) === thisMonth).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const goalPct = goal > 0 ? Math.min(100, (thisMonthTotal / goal) * 100) : 0;
+  const [thisY, thisM] = thisMonth.split("-").map(Number);
+
   const receivables = useMemo(() => {
     const map = {};
     pendingIncomes.forEach((i) => {
@@ -1930,10 +2184,53 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
         <StatCell label="saldo" value={fmtEUR(balance)} color={balance >= 0 ? GREEN : RED} icon={<Scale size={14} />} border strong />
         <StatCell label="saldo previsto" value={fmtEUR(forecast)} color={forecast >= 0 ? GOLD : RED} icon={<Clock size={14} />} border />
       </div>
-      {(totalPending > 0 || totalUnpaid > 0) && (
-        <p style={{ margin: "-6px 0 18px", fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
-          previsto = saldo + {fmtEUR(totalPending)} por receber{totalUnpaid > 0 ? ` − ${fmtEUR(totalUnpaid)} por pagar` : ""}
-        </p>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", margin: "-6px 0 18px", fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+        {(totalPending > 0 || totalUnpaid > 0) && (
+          <span>previsto = saldo + {fmtEUR(totalPending)} por receber{totalUnpaid > 0 ? ` − ${fmtEUR(totalUnpaid)} por pagar` : ""}</span>
+        )}
+        {taxPct > 0 && balance > 0 && (
+          <span>
+            pôr de parte para impostos ({String(taxPct).replace(".", ",")}%): <span style={{ color: GOLD }}>{fmtEUR(taxAmount)}</span> · livre para gastar:{" "}
+            <span style={{ color: GREEN }}>{fmtEUR(balance - taxAmount)}</span>
+          </span>
+        )}
+      </div>
+
+      {/* Objetivo do mês */}
+      {goal > 0 && (
+        <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 28 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: INK }}>
+              Objetivo de {MONTHS_PT[thisM - 1].toLowerCase()}
+            </h3>
+            <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+              <span style={{ fontSize: 17, fontWeight: 700, color: thisMonthTotal >= goal ? GREEN : INK }}>{fmtEUR(thisMonthTotal)}</span> de {fmtEUR(goal)}
+            </span>
+          </div>
+          <div
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(goalPct)}
+            aria-label={`objetivo de ${MONTHS_PT[thisM - 1].toLowerCase()}`}
+            style={{ height: 8, background: HILITE, border: `1px solid ${LINE}` }}
+          >
+            <div style={{ width: `${goalPct}%`, height: "100%", background: thisMonthTotal >= goal ? GREEN : GOLD }} />
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", marginTop: 10, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+            <span>{Math.round((thisMonthTotal / goal) * 100)}% recebido</span>
+            <span>{thisMonthTotal >= goal ? "objetivo atingido" : `faltam ${fmtEUR(goal - thisMonthTotal)}`}</span>
+            {pendingThisMonth > 0 && <span>{fmtEUR(pendingThisMonth)} deste mês ainda por receber</span>}
+            <span>
+              mês anterior: {fmtEUR(lastMonthTotal)}
+              {lastMonthTotal > 0 && (
+                <span style={{ color: thisMonthTotal >= lastMonthTotal ? GREEN : RED }}>
+                  {" "}({thisMonthTotal >= lastMonthTotal ? "+" : "−"}{Math.abs(Math.round(((thisMonthTotal - lastMonthTotal) / lastMonthTotal) * 100))}%)
+                </span>
+              )}
+            </span>
+          </div>
+        </div>
       )}
 
       {/* A receber */}
@@ -1943,7 +2240,7 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
             <div>
               <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>A receber</h3>
               <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
-                pagamentos pendentes por cliente · marca como recebido em Receitas
+                pagamentos pendentes por cliente · os mensais criam logo o do mês seguinte
               </p>
             </div>
             <span style={{ fontSize: 17, fontWeight: 700, color: GOLD, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtEUR(totalPending)}</span>
@@ -1958,16 +2255,23 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
                 const d = daysBetween(i.date, today);
                 const late = d > 0;
                 return (
-                  <div key={i.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                  <div key={i.id} style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "4px 12px", marginTop: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
                     <span>
                       {i.date.split("-").reverse().join("/")} · {i.desc}
                       {i.recurrence === "mensal" ? " · mensal" : ""}
                     </span>
-                    <span style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                    <span style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
                       <span style={{ color: late ? RED : INK_SOFT }}>
                         {d === 0 ? "hoje" : late ? `há ${d} dia${d === 1 ? "" : "s"}` : `daqui a ${-d} dia${d === -1 ? "" : "s"}`}
                       </span>
                       <span style={{ color: INK }}>{fmtEUR(i.amount)}</span>
+                      <button
+                        onClick={() => setIncomes(markReceived(incomes, i.id))}
+                        aria-label={`marcar ${fmtEUR(i.amount)} de ${g.name} como recebido`}
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 8px", background: "none", border: `1px solid ${GREEN}`, color: GREEN, fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", borderRadius: 2 }}
+                      >
+                        <Check size={11} /> recebido
+                      </button>
                     </span>
                   </div>
                 );
@@ -2005,7 +2309,7 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
             onClick={startEditSettings}
             style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, color: GOLD, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}
           >
-            <Pencil size={11} /> mudar taxa ou mês
+            <Settings size={11} /> definições (taxa, mês, impostos, objetivo)
           </button>
         )}
       </div>
@@ -2030,6 +2334,28 @@ function BalancoView({ incomes, expenses, events, clients, settings, setSettings
               onChange={(e) => setSettingsForm({ ...settingsForm, marginStart: e.target.value })}
               type="month"
               style={{ ...inputStyle, width: 170 }}
+            />
+          </div>
+          <div>
+            <label htmlFor="reserva-impostos" style={fieldLabelStyle}>reserva para impostos (%)</label>
+            <input
+              id="reserva-impostos"
+              value={settingsForm.taxReserve}
+              onChange={(e) => setSettingsForm({ ...settingsForm, taxReserve: e.target.value })}
+              type="text"
+              inputMode="decimal"
+              style={{ ...inputStyle, width: 110 }}
+            />
+          </div>
+          <div>
+            <label htmlFor="objetivo-mensal" style={fieldLabelStyle}>objetivo mensal (€)</label>
+            <input
+              id="objetivo-mensal"
+              value={settingsForm.monthlyGoal}
+              onChange={(e) => setSettingsForm({ ...settingsForm, monthlyGoal: e.target.value })}
+              type="text"
+              inputMode="decimal"
+              style={{ ...inputStyle, width: 120 }}
             />
           </div>
           <button onClick={saveSettings} style={{ padding: "9px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -2505,4 +2831,4 @@ function CalendarView({ events, setEvents, clients }) {
 }
 
 // usadas pelos testes (App.test.jsx)
-export { parseNum, todayISO, addMonths, daysBetween };
+export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText };

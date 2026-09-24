@@ -29,6 +29,8 @@ ficam na base de dados partilhada do artifact em vez do `localStorage`.
 npm test
 ```
 
-Testam as contas do Balanço (saldo, previsto, margem, lucro por cliente),
+Testam as contas do Balanço (saldo, previsto, margem, lucro por cliente,
+objetivo do mês, reserva para impostos), os pagamentos em atraso, a pesquisa,
+o CSV, os cartões no telemóvel,
 a leitura de valores em formato português, as datas, os pagamentos mensais
 e a confirmação ao apagar.
