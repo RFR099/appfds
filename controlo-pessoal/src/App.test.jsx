@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import App, { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText } from "./App.jsx";
+import App, { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText, salesInMonth } from "./App.jsx";
 
 // O pt-PT formata "1900,00 €" com espaços especiais (sem quebra); o teste
 // compara com espaços normais.
@@ -210,17 +210,37 @@ describe("com a data fixa em 24/09/2026", () => {
     expect(screen.getByLabelText("2 pagamento(s) em atraso")).toBeTruthy();
   });
 
-  it("objetivo do mês e reserva para impostos", async () => {
+  it("reserva para impostos", async () => {
     const user = await openApp();
     await user.click(screen.getByRole("button", { name: /^Balanço/ }));
+    expect(pageText()).toContain("pôr de parte para impostos (25%): 475,00 € · livre para gastar: 1425,00 €");
+  });
+
+  it("objetivos de vendas contam clientes vendidos no mês", async () => {
+    const user = await openApp();
+    await user.click(screen.getByRole("button", { name: /^Balanço/ }));
+    expect(pageText()).toContain("ainda sem objetivos");
+
+    const addGoal = async (n, type) => {
+      await user.click(screen.getByRole("button", { name: "objetivo" }));
+      await user.type(screen.getByLabelText("vender por mês"), n);
+      await user.selectOptions(screen.getByLabelText("de"), type);
+      await user.click(screen.getByRole("button", { name: "guardar" }));
+    };
+    await addGoal("3", "site");
+    await addGoal("2", "qualquer");
+
+    const bars = screen.getAllByRole("progressbar");
+    expect(bars.map((b) => b.getAttribute("aria-label"))).toEqual(["sites em setembro", "novos clientes em setembro"]);
+    expect(bars.map((b) => b.getAttribute("aria-valuenow"))).toEqual(["1", "2"]);
     const text = pageText();
-    expect(text).toContain("Objetivo de setembro");
-    expect(text).toContain("600,00 € de 1000,00 €");
-    expect(text).toContain("60% recebido");
-    expect(text).toContain("faltam 400,00 €");
-    expect(text).toContain("mês anterior: 625,00 € (−4%)");
-    expect(text).toContain("pôr de parte para impostos (25%): 475,00 € · livre para gastar: 1425,00 €");
-    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("60");
+    expect(text).toContain("Sites1 de 3");
+    expect(text).toContain("faltam 2 sitesespomecanicamês anterior: 1");
+    expect(text).toContain("Novos clientes (qualquer serviço)2 de 2");
+    expect(text).toContain("objetivo atingidoespomecanica, prelabt- gestão de produtos quimicosmês anterior: 3");
+
+    // ficam guardados nas definições
+    await waitFor(() => expect(localStorage.getItem("controlo-pessoal-data")).toContain('"goals":[{'));
   });
 
   it("marcar como recebido em 'A receber' atualiza o saldo e cria o mês seguinte", async () => {
@@ -235,6 +255,36 @@ describe("com a data fixa em 24/09/2026", () => {
       .filter((t) => t.includes("Escondidinho") && t.includes("250,00 €"));
     expect(escondidinho.find((t) => t.includes("01/10/2026"))).toContain("recebido");
     expect(escondidinho.find((t) => t.includes("01/11/2026"))).toContain("pendente");
+  });
+});
+
+describe("salesInMonth", () => {
+  const incomes = [
+    { clientId: "a", date: "2026-09-18" },
+    { clientId: "a", date: "2026-10-18" },
+    { clientId: "b", date: "2026-08-01" },
+  ];
+  const clients = [
+    { id: "a", name: "A", serviceType: "site" },
+    { id: "b", name: "B", serviceType: "redes_sociais_site", contractStart: "2026-09-05" },
+    { id: "c", name: "C", serviceType: "automacao" },
+  ];
+  const names = (month, type) => salesInMonth(clients, incomes, month, type).map((c) => c.name);
+
+  it("usa o início do contrato e, sem ele, a primeira receita", () => {
+    expect(names("2026-09", "qualquer")).toEqual(["A", "B"]);
+    expect(names("2026-10", "qualquer")).toEqual([]);
+    expect(names("2026-08", "qualquer")).toEqual([]);
+  });
+
+  it("redes sociais + site conta para os dois objetivos", () => {
+    expect(names("2026-09", "site")).toEqual(["A", "B"]);
+    expect(names("2026-09", "redes_sociais")).toEqual(["B"]);
+    expect(names("2026-09", "automacao")).toEqual([]);
+  });
+
+  it("um cliente sem data nem receitas não conta", () => {
+    expect(salesInMonth(clients, [], "2026-09", "automacao")).toEqual([]);
   });
 });
 

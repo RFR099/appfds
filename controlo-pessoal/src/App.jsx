@@ -136,8 +136,15 @@ const STORAGE_KEY = "controlo-pessoal-data";
 
 // Definições editáveis no Balanço e guardadas junto com os dados: taxa horária
 // da mão de obra, mês a partir do qual conta a margem, % do saldo a pôr de
-// parte para impostos e objetivo de faturação mensal.
-const DEFAULT_SETTINGS = { hourlyRate: 15, marginStart: "2026-09-01", taxReserve: 25, monthlyGoal: 1000 };
+// parte para impostos e objetivos de vendas por mês ([{ id, type, target }]).
+const DEFAULT_SETTINGS = { hourlyRate: 15, marginStart: "2026-09-01", taxReserve: 25, goals: [] };
+
+// junta o que está guardado aos valores por omissão (e larga o antigo
+// objetivo em dinheiro, que deu lugar aos objetivos de vendas)
+function withDefaults(saved) {
+  const { monthlyGoal, ...rest } = saved || {};
+  return { ...DEFAULT_SETTINGS, ...rest };
+}
 
 // Dados de partida — só usados quando ainda não há nada guardado. Espelham o
 // livro real a 24/09/2026 e já incluem o efeito das correções automáticas
@@ -425,7 +432,7 @@ function FinancasApp() {
         if (result && result.value) {
           const parsed = JSON.parse(result.value);
           lastSynced.current = result.value;
-          if (parsed.settings) setSettings({ ...DEFAULT_SETTINGS, ...parsed.settings });
+          if (parsed.settings) setSettings(withDefaults(parsed.settings));
           loadedEvents = parsed.events || [];
           loadedIncomes = parsed.incomes || [];
           loadedExpenses = parsed.expenses || [];
@@ -472,7 +479,7 @@ function FinancasApp() {
       setNotes(parsed.notes || []);
       setClients(parsed.clients || []);
       setMigrations(parsed.migrations || []);
-      setSettings({ ...DEFAULT_SETTINGS, ...(parsed.settings || {}) });
+      setSettings(withDefaults(parsed.settings));
       setRemoteNotice(true);
       clearTimeout(noticeTimer);
       noticeTimer = setTimeout(() => setRemoteNotice(false), 4000);
@@ -550,7 +557,7 @@ function FinancasApp() {
     setNotes(d.notes || []);
     setClients(d.clients || []);
     setMigrations(d.migrations || SEED_DATA.migrations);
-    setSettings({ ...DEFAULT_SETTINGS, ...(d.settings || {}) });
+    setSettings(withDefaults(d.settings));
     setBackupMsg({ ok: true, text: `Dados repostos a partir de ${pendingImport.name}.` });
     setPendingImport(null);
   }
@@ -2007,7 +2014,6 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
       hourlyRate: String(settings.hourlyRate).replace(".", ","),
       marginStart: MARGIN_START.slice(0, 7),
       taxReserve: String(settings.taxReserve).replace(".", ","),
-      monthlyGoal: String(settings.monthlyGoal).replace(".", ","),
     });
     setSettingsError("");
     setEditingSettings(true);
@@ -2028,12 +2034,7 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
       setSettingsError("A reserva para impostos é uma percentagem entre 0 e 100.");
       return;
     }
-    const goal = parseNum(settingsForm.monthlyGoal);
-    if (isNaN(goal) || goal < 0) {
-      setSettingsError("Escreve um objetivo mensal válido (ex: 1.000).");
-      return;
-    }
-    setSettings({ ...settings, hourlyRate: rate, marginStart: `${settingsForm.marginStart}-01`, taxReserve: tax, monthlyGoal: goal });
+    setSettings({ ...settings, hourlyRate: rate, marginStart: `${settingsForm.marginStart}-01`, taxReserve: tax });
     setEditingSettings(false);
   }
 
@@ -2142,16 +2143,6 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
   const taxPct = Number(settings.taxReserve) || 0;
   const taxAmount = balance > 0 ? (balance * taxPct) / 100 : 0;
 
-  // objetivo do mês corrente, contra o que já foi recebido este mês
-  const goal = Number(settings.monthlyGoal) || 0;
-  const thisMonth = todayISO().slice(0, 7);
-  const lastMonth = addMonths(`${thisMonth}-01`, -1).slice(0, 7);
-  const receivedIn = (m) => receivedIncomes.filter((i) => i.date.slice(0, 7) === m).reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const thisMonthTotal = receivedIn(thisMonth);
-  const lastMonthTotal = receivedIn(lastMonth);
-  const pendingThisMonth = pendingIncomes.filter((i) => i.date.slice(0, 7) === thisMonth).reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const goalPct = goal > 0 ? Math.min(100, (thisMonthTotal / goal) * 100) : 0;
-  const [thisY, thisM] = thisMonth.split("-").map(Number);
 
   const receivables = useMemo(() => {
     const map = {};
@@ -2196,42 +2187,7 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
         )}
       </div>
 
-      {/* Objetivo do mês */}
-      {goal > 0 && (
-        <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 28 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
-            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: INK }}>
-              Objetivo de {MONTHS_PT[thisM - 1].toLowerCase()}
-            </h3>
-            <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
-              <span style={{ fontSize: 17, fontWeight: 700, color: thisMonthTotal >= goal ? GREEN : INK }}>{fmtEUR(thisMonthTotal)}</span> de {fmtEUR(goal)}
-            </span>
-          </div>
-          <div
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(goalPct)}
-            aria-label={`objetivo de ${MONTHS_PT[thisM - 1].toLowerCase()}`}
-            style={{ height: 8, background: HILITE, border: `1px solid ${LINE}` }}
-          >
-            <div style={{ width: `${goalPct}%`, height: "100%", background: thisMonthTotal >= goal ? GREEN : GOLD }} />
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", marginTop: 10, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
-            <span>{Math.round((thisMonthTotal / goal) * 100)}% recebido</span>
-            <span>{thisMonthTotal >= goal ? "objetivo atingido" : `faltam ${fmtEUR(goal - thisMonthTotal)}`}</span>
-            {pendingThisMonth > 0 && <span>{fmtEUR(pendingThisMonth)} deste mês ainda por receber</span>}
-            <span>
-              mês anterior: {fmtEUR(lastMonthTotal)}
-              {lastMonthTotal > 0 && (
-                <span style={{ color: thisMonthTotal >= lastMonthTotal ? GREEN : RED }}>
-                  {" "}({thisMonthTotal >= lastMonthTotal ? "+" : "−"}{Math.abs(Math.round(((thisMonthTotal - lastMonthTotal) / lastMonthTotal) * 100))}%)
-                </span>
-              )}
-            </span>
-          </div>
-        </div>
-      )}
+      <GoalsCard clients={clients} incomes={incomes} settings={settings} setSettings={setSettings} />
 
       {/* A receber */}
       {receivables.length > 0 && (
@@ -2309,7 +2265,7 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
             onClick={startEditSettings}
             style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, color: GOLD, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}
           >
-            <Settings size={11} /> definições (taxa, mês, impostos, objetivo)
+            <Settings size={11} /> definições (taxa, mês, impostos)
           </button>
         )}
       </div>
@@ -2345,17 +2301,6 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
               type="text"
               inputMode="decimal"
               style={{ ...inputStyle, width: 110 }}
-            />
-          </div>
-          <div>
-            <label htmlFor="objetivo-mensal" style={fieldLabelStyle}>objetivo mensal (€)</label>
-            <input
-              id="objetivo-mensal"
-              value={settingsForm.monthlyGoal}
-              onChange={(e) => setSettingsForm({ ...settingsForm, monthlyGoal: e.target.value })}
-              type="text"
-              inputMode="decimal"
-              style={{ ...inputStyle, width: 120 }}
             />
           </div>
           <button onClick={saveSettings} style={{ padding: "9px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -2539,6 +2484,160 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Tipos de objetivo: novos clientes de qualquer serviço, ou de um serviço.
+const GOAL_TYPES = [
+  { value: "qualquer", label: "Novos clientes (qualquer serviço)", one: "novo cliente", plural: "novos clientes" },
+  { value: "site", label: "Sites", one: "site", plural: "sites" },
+  { value: "redes_sociais", label: "Clientes de redes sociais", one: "cliente de redes sociais", plural: "clientes de redes sociais" },
+  { value: "automacao", label: "Automações", one: "automação", plural: "automações" },
+  { value: "redes_sociais_site", label: "Clientes de redes sociais + site", one: "cliente de redes sociais + site", plural: "clientes de redes sociais + site" },
+];
+
+// Data em que um cliente foi "vendido": o início do contrato, se estiver
+// preenchido; senão, a data da primeira receita desse cliente.
+function saleDate(client, incomes) {
+  if (client.contractStart) return client.contractStart;
+  const dates = incomes.filter((i) => i.clientId === client.id).map((i) => i.date).sort();
+  return dates[0] || null;
+}
+
+// Clientes vendidos num mês (AAAA-MM) que contam para um tipo de objetivo.
+// "Redes sociais + site" conta tanto para sites como para redes sociais.
+function salesInMonth(clients, incomes, month, type) {
+  return (clients || []).filter((c) => {
+    const d = saleDate(c, incomes);
+    if (!d || d.slice(0, 7) !== month) return false;
+    if (type === "qualquer") return true;
+    if (c.serviceType === type) return true;
+    return c.serviceType === "redes_sociais_site" && (type === "site" || type === "redes_sociais");
+  });
+}
+
+function GoalsCard({ clients, incomes, settings, setSettings }) {
+  const goals = settings.goals || [];
+  const thisMonth = todayISO().slice(0, 7);
+  const lastMonth = addMonths(`${thisMonth}-01`, -1).slice(0, 7);
+  const monthName = MONTHS_PT[Number(thisMonth.slice(5, 7)) - 1].toLowerCase();
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ type: "site", target: "" });
+  const [error, setError] = useState("");
+
+  function addGoal() {
+    const target = parseNum(form.target);
+    if (!Number.isInteger(target) || target < 1) {
+      setError("Escreve quantos queres vender (ex: 3).");
+      return;
+    }
+    const others = goals.filter((g) => g.type !== form.type);
+    setSettings({ ...settings, goals: [...others, { id: uid(), type: form.type, target }] });
+    setForm({ type: "site", target: "" });
+    setError("");
+    setAdding(false);
+  }
+
+  function removeGoal(id) {
+    setSettings({ ...settings, goals: goals.filter((g) => g.id !== id) });
+  }
+
+  const small = { padding: "7px 12px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" };
+
+  return (
+    <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 28 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: goals.length ? 4 : 0 }}>
+        <div>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Objetivos de {monthName}</h3>
+          <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+            {goals.length
+              ? "clientes vendidos este mês · conta o início do contrato ou, sem ele, a primeira receita"
+              : "ainda sem objetivos — por exemplo, vender 3 sites por mês"}
+          </p>
+        </div>
+        {!adding && (
+          <button onClick={() => setAdding(true)} style={{ ...small, display: "flex", alignItems: "center", gap: 6, background: "none", border: `1px solid ${LINE}`, color: INK }}>
+            <Plus size={12} /> objetivo
+          </button>
+        )}
+      </div>
+
+      {adding && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginTop: 14, padding: 12, border: `1px solid ${GOLD}`, background: HILITE }}>
+          <div>
+            <label htmlFor="objetivo-quantos" style={fieldLabelStyle}>vender por mês</label>
+            <input
+              id="objetivo-quantos"
+              value={form.target}
+              onChange={(e) => setForm({ ...form, target: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && addGoal()}
+              type="text"
+              inputMode="numeric"
+              placeholder="3"
+              style={{ ...inputStyle, width: 80 }}
+            />
+          </div>
+          <div style={{ flex: "1 1 200px" }}>
+            <label htmlFor="objetivo-tipo" style={fieldLabelStyle}>de</label>
+            <select id="objetivo-tipo" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} style={inputStyle}>
+              {GOAL_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={addGoal} style={{ ...small, padding: "9px 14px", background: INK, color: PAPER, border: "none" }}>
+            guardar
+          </button>
+          <button onClick={() => { setAdding(false); setError(""); }} style={{ ...small, padding: "9px 14px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}` }}>
+            cancelar
+          </button>
+          {error && <p style={{ width: "100%", margin: 0, fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{error}</p>}
+          {goals.some((g) => g.type === form.type) && (
+            <p style={{ width: "100%", margin: 0, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+              já tens um objetivo deste tipo — este substitui-o
+            </p>
+          )}
+        </div>
+      )}
+
+      {goals.map((g) => {
+        const type = GOAL_TYPES.find((t) => t.value === g.type) || GOAL_TYPES[0];
+        const sold = salesInMonth(clients, incomes, thisMonth, g.type);
+        const before = salesInMonth(clients, incomes, lastMonth, g.type).length;
+        const done = sold.length >= g.target;
+        const pct = Math.min(100, (sold.length / g.target) * 100);
+        return (
+          <div key={g.id} style={{ borderTop: `1px solid ${LINE}`, marginTop: 14, paddingTop: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: INK }}>{type.label}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 17, fontWeight: 700, color: done ? GREEN : INK }}>{sold.length}</span> de {g.target}
+                </span>
+                <DeleteButton onConfirm={() => removeGoal(g.id)} question="apagar objetivo?" />
+              </span>
+            </div>
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={g.target}
+              aria-valuenow={sold.length}
+              aria-label={`${type.plural} em ${monthName}`}
+              style={{ height: 8, background: HILITE, border: `1px solid ${LINE}` }}
+            >
+              <div style={{ width: `${pct}%`, height: "100%", background: done ? GREEN : GOLD }} />
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", marginTop: 8, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+              <span style={{ color: done ? GREEN : INK_SOFT }}>
+                {done ? "objetivo atingido" : g.target - sold.length === 1 ? `falta 1 ${type.one}` : `faltam ${g.target - sold.length} ${type.plural}`}
+              </span>
+              {sold.length > 0 && <span>{sold.map((c) => c.name).join(", ")}</span>}
+              <span>mês anterior: {before}</span>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2831,4 +2930,4 @@ function CalendarView({ events, setEvents, clients }) {
 }
 
 // usadas pelos testes (App.test.jsx)
-export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText };
+export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText, salesInMonth };
