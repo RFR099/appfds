@@ -21,6 +21,16 @@ reencaminhado e, mesmo chamando a API diretamente, recebe `403`. A sessão usa u
 desativar uma conta corta o acesso de imediato. Há também um cabeçalho anti-CSRF obrigatório nos pedidos
 de escrita, limite de tentativas de login e validação do conteúdo real das fotografias.
 
+## Capturas de ecrã
+
+| Diretor | Tablet do operador |
+|---|---|
+| ![Dashboard](docs/screenshots/02-diretor-dashboard.png) | ![Hoje](docs/screenshots/20-tablet-hoje.png) |
+| ![Operação](docs/screenshots/04-diretor-operacao.png) | ![Terminar serviço](docs/screenshots/22-tablet-terminar-servico.png) |
+| ![Detalhe do serviço](docs/screenshots/06-diretor-servico-detalhe.png) | ![Serviços](docs/screenshots/21-tablet-servicos.png) |
+
+Todas as capturas estão em [`docs/screenshots/`](docs/screenshots/).
+
 ## Stack
 
 - **server/** — Node.js 22 (≥ 22.13) + Express 5 + SQLite (`node:sqlite`, sem dependências nativas).
