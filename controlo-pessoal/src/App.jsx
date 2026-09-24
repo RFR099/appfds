@@ -414,47 +414,28 @@ function RedesSociaisApp() {
   const [saveError, setSaveError] = useState(false);
   const [platform, setPlatform] = useState("instagram");
   const [stats, setStats] = useState({
-    instagram: {
-      ...emptySocialStats(),
-      seguidores: 466,
-      seguidoresDelta: 6.2,
-      alcance: 4487,
-      alcanceDelta: 0,
-      engagement: 1.6,
-      engagementDelta: 0,
-      visitas: 0,
-      visitasDelta: 0,
-    },
+    instagram: { ...emptySocialStats(), seguidores: 465 },
     facebook: emptySocialStats(),
     tiktok: emptySocialStats(),
     linkedin: emptySocialStats(),
   });
   const [posts, setPosts] = useState([
     {
-      id: "seed-ig-3",
+      id: "seed-ig-1",
       platform: "instagram",
       tipo: "Vídeo",
-      alcance: 3900,
+      alcance: 0,
       likes: 29,
-      partilhas: 40,
+      partilhas: 0,
       date: "2026-09-18",
     },
     {
       id: "seed-ig-2",
       platform: "instagram",
-      tipo: "Story",
-      alcance: 275,
-      likes: 4,
-      partilhas: 3,
-      date: "2026-09-18",
-    },
-    {
-      id: "seed-ig-1",
-      platform: "instagram",
       tipo: "Carrossel",
-      alcance: 305,
+      alcance: 0,
       likes: 13,
-      partilhas: 7,
+      partilhas: 0,
       date: "2026-09-22",
     },
   ]);
