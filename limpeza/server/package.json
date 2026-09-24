@@ -1,0 +1,26 @@
+{
+  "name": "limpeza-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "API da plataforma de gest\u00e3o operacional e financeira (empresa de limpeza)",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/index.js",
+    "seed": "node --disable-warning=ExperimentalWarning src/seed-cli.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "record-demo": "node --disable-warning=ExperimentalWarning scripts/record-demo.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.4.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.0"
+  }
+}
