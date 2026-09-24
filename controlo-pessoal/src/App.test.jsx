@@ -179,6 +179,13 @@ describe("markReceived", () => {
     expect(created[0]).toMatchObject({ date: "2026-11-01", received: false, amount: 250, clientId: "c1", recurrence: "mensal" });
   });
 
+  it("num pagamento anual cria o do ano seguinte", () => {
+    const list = [{ id: "a", desc: "Renovação site", amount: 120, date: "2026-10-01", received: false, clientId: "c1", recurrence: "anual" }];
+    const created = markReceived(list, "a").filter((i) => i.id !== "a");
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ date: "2027-10-01", received: false, amount: 120, recurrence: "anual" });
+  });
+
   it("numa compra única só marca como recebido", () => {
     const list = [{ id: "a", desc: "site", amount: 350, date: "2026-09-18", received: false }];
     expect(markReceived(list, "a")).toEqual([{ ...list[0], received: true }]);

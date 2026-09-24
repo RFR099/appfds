@@ -929,11 +929,11 @@ function ensureMonthlyBuffer(list, base) {
   ];
 }
 
-// Anual: quando fica marcada como recebida, gera a ocorrência seguinte já pendente,
-// com um mês de adiantamento.
+// Anual: quando fica marcada como recebida, gera já pendente a do ano seguinte
+// (mesmo dia e mês; 29/02 passa a 28/02 nos anos não bissextos).
 function maybeSpawnNextAnnual(list, base) {
   if (base.recurrence !== "anual") return list;
-  const nextDate = addMonths(base.date, 1);
+  const nextDate = addMonths(base.date, 12);
   const already = list.some(
     (i) =>
       i.desc === base.desc &&
