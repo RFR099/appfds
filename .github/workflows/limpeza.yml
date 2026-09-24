@@ -1,0 +1,23 @@
+name: Limpeza (app de gestão)
+
+on:
+  push:
+    branches: [main, master]
+    paths: ['limpeza/**', '.github/workflows/limpeza.yml']
+  pull_request:
+    paths: ['limpeza/**', '.github/workflows/limpeza.yml']
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: limpeza
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm run install:all
+      - run: npm test
+      - run: npm run build

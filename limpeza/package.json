@@ -1,0 +1,14 @@
+{
+  "name": "limpeza",
+  "private": true,
+  "description": "Plataforma de gestão operacional e financeira para empresa de limpeza",
+  "scripts": {
+    "install:all": "npm --prefix server ci && npm --prefix client ci",
+    "build": "npm --prefix client run build",
+    "start": "npm --prefix server start",
+    "seed": "npm --prefix server run seed",
+    "test": "npm --prefix server test",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev"
+  }
+}

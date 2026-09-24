@@ -1,5 +1,7 @@
 # fds-backend
 
+> Este repositório contém também, em [`limpeza/`](limpeza/README.md), a plataforma de gestão operacional e financeira para uma empresa de limpeza (diretor + operadores/chefes de carrinha).
+
 Backend da Plataforma de Gestão de Produtos Químicos (dstgroup chemicals) — **Fase 0** do plano de implementação (ver `especificacao-tecnica.md`).
 
 ## O que esta Fase 0 entrega
