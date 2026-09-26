@@ -332,9 +332,9 @@ describe("exportar CSV", () => {
 
     const csv = await saved.text();
     const lines = csv.replace(/^\ufeff/, "").split("\r\n");
-    expect(lines[0]).toBe("data;cliente;pagamento;valor;estado;recorrência");
-    expect(lines).toContain("19/09/2026;prelabt- gestão de produtos quimicos;Pagamento;1500,00;pendente;Compra única");
-    expect(lines).toContain("01/10/2026;Escondidinho;Pagamento;250,00;pendente;Mensal");
+    expect(lines[0]).toBe("data;cliente;pagamento;valor;estado;recorrência;recibo");
+    expect(lines).toContain("19/09/2026;prelabt- gestão de produtos quimicos;Pagamento;1500,00;pendente;Compra única;");
+    expect(lines).toContain("01/10/2026;Escondidinho;Pagamento;250,00;pendente;Mensal;");
     expect(lines).toHaveLength(14); // cabeçalho + 13 receitas
     expect(click.mock.contexts[0].download).toBe("innovatweb-receitas-tudo.csv");
     click.mockRestore();
@@ -358,5 +358,108 @@ describe("telemóvel", () => {
     expect(text).toContain("prelabt- gestão de produtos quimicos");
     expect(text).toContain("19/09/2026 · Pagamento");
     expect(within(card).getByRole("button", { name: "pendente" })).toBeTruthy();
+  });
+});
+
+describe("clientes", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-09-26T12:00:00") });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("não deixa guardar um cliente sem tipo de serviço", async () => {
+    const user = await openApp();
+    await user.click(screen.getByRole("button", { name: "Clientes" }));
+    await user.type(screen.getByPlaceholderText("Nome do cliente"), "Cliente novo");
+    await user.click(screen.getByRole("button", { name: "adicionar cliente" }));
+    expect(pageText()).toContain("Escolhe o tipo de serviço");
+    expect(screen.queryByText("Cliente novo")).toBeNull();
+
+    // a prelabt não tem tipo: editar e guardar sem escolher não passa
+    const row = screen.getByText("prelabt- gestão de produtos quimicos").closest(".row-hover");
+    expect(within(row).getByRole("button", { name: /sem tipo de serviço/ })).toBeTruthy();
+    await user.click(within(row).getByRole("button", { name: "editar" }));
+    await user.click(within(row).getByRole("button", { name: "guardar" }));
+    expect(within(row).getByText(/Escolhe o tipo de serviço antes de guardar/)).toBeTruthy();
+  });
+
+  it("separa ativos de terminados e mostra a receita mensal garantida", async () => {
+    const user = await openApp();
+    await user.click(screen.getByRole("button", { name: "Clientes" }));
+    const text = pageText();
+    // Amariaviaja: contrato acabou em 30/04 → terminado
+    expect(text).toContain("5 clientes ativos");
+    expect(text).toContain("receita mensal garantida: 450,00 €/mês");
+    expect(screen.queryByText("Amariaviaja")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "ver terminados (1)" }));
+    expect(screen.getByText("Amariaviaja")).toBeTruthy();
+
+    // terminar o Frangos: sai da garantida e dos seletores das receitas
+    const frangos = screen.getByText("Frangos e Companhia").closest(".row-hover");
+    await user.click(within(frangos).getByRole("button", { name: "terminar" }));
+    expect(pageText()).toContain("4 clientes ativos");
+    expect(pageText()).toContain("receita mensal garantida: 250,00 €/mês");
+
+    await user.click(screen.getByRole("button", { name: "Receitas" }));
+    const clientSelect = screen.getAllByRole("combobox")[0];
+    const options = within(clientSelect).getAllByRole("option").map((o) => o.textContent);
+    expect(options).not.toContain("Frangos e Companhia");
+    expect(options).not.toContain("Amariaviaja");
+    expect(options).toContain("Escondidinho");
+  });
+});
+
+describe("despesas recorrentes", () => {
+  it("uma despesa mensal paga cria a do mês seguinte, por pagar", async () => {
+    const user = await openApp();
+    await user.click(screen.getByRole("button", { name: "Despesas" }));
+    await user.type(screen.getByPlaceholderText("Pagamento (ex: mensalidade, sinal…)"), "Alojamento");
+    await user.type(screen.getByPlaceholderText("0.00"), "12,50");
+    fireEvent.change(document.querySelector('input[type="date"]'), { target: { value: "2026-09-10" } });
+    const recurrenceSelect = screen.getAllByRole("combobox").find((s) => within(s).queryByRole("option", { name: "Compra única" }));
+    await user.selectOptions(recurrenceSelect, "mensal");
+    await user.click(screen.getByRole("button", { name: "adicionar" }));
+
+    const rows = [...document.querySelectorAll(".row-hover")].map((r) => r.textContent.replace(/\s+/g, " ")).filter((t) => t.includes("Alojamento"));
+    expect(rows.find((r) => r.includes("10/09/2026"))).toContain("12,50 €pago");
+    expect(rows.find((r) => r.includes("10/10/2026"))).toContain("12,50 €não pago");
+  });
+});
+
+describe("recibos", () => {
+  it("conta as receitas sem recibo e regista o número", async () => {
+    const user = await openApp();
+    await user.click(screen.getByRole("button", { name: /^Balanço/ }));
+    expect(pageText()).toContain("6 receitas recebidas sem recibo registado");
+
+    await user.click(screen.getByRole("button", { name: "Receitas" }));
+    await user.click(screen.getByRole("button", { name: /sem recibo \(6\)/ }));
+    expect(document.querySelectorAll(".row-hover")).toHaveLength(6);
+
+    const row = [...document.querySelectorAll(".row-hover")].find((r) => r.textContent.includes("cartoes visita"));
+    await user.click(within(row).getByRole("button", { name: /sem recibo/ }));
+    await user.type(within(row).getByLabelText("número do recibo"), "FR 12{Enter}");
+
+    // com o filtro ativo, a receita sai da lista; sem filtro, mostra o nº
+    expect(screen.getByRole("button", { name: /sem recibo \(5\)/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /sem recibo \(5\)/ }));
+    expect(pageText()).toContain("cartoes visita recibo FR 12");
+  });
+});
+
+describe("anular", () => {
+  it("repõe o que foi apagado", async () => {
+    const user = await openApp();
+    await user.click(screen.getByRole("button", { name: /^Notas/ }));
+    const note = "escondidinho deve 100€ mes de agosto";
+    const row = screen.getByText(note).closest(".row-hover");
+    await user.click(within(row).getByRole("button", { name: "remover" }));
+    await user.click(within(row).getByRole("button", { name: "sim" }));
+    expect(screen.queryByText(note)).toBeNull();
+
+    expect(screen.getByRole("status").textContent).toContain("nota apagada");
+    await user.click(screen.getByRole("button", { name: "anular" }));
+    expect(screen.getByText(note)).toBeTruthy();
   });
 });

@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail, Download, Upload, Clock, Search, Check, Settings } from "lucide-react";
+import { useState, useEffect, useMemo, useRef, createContext, useContext } from "react";
+import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail, Download, Upload, Clock, Search, Check, Settings, RotateCcw, FileText } from "lucide-react";
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 
 const MONTHS_ABBR = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
@@ -88,10 +88,39 @@ function normalizeText(s) {
   return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
+// Um cliente está terminado se o marcaste assim ou se o contrato já acabou
+// (a não ser que o tenhas reativado).
+function isEnded(client) {
+  if (client.ended === true) return true;
+  if (client.ended === false) return false;
+  return !!client.contractEnd && client.contractEnd < todayISO();
+}
+
+// Quanto um cliente paga por mês: o valor mais recente de cada série mensal
+// (mesma descrição) nas receitas desse cliente.
+function monthlyValue(clientId, incomes) {
+  const latest = {};
+  incomes
+    .filter((i) => i.clientId === clientId && i.recurrence === "mensal")
+    .forEach((i) => {
+      if (!latest[i.desc] || i.date > latest[i.desc].date) latest[i.desc] = i;
+    });
+  return Object.values(latest).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+}
+
+// receita recebida de um cliente para a qual ainda não registaste o recibo
+function needsReceipt(income) {
+  return income.received !== false && !!income.clientId && !income.receipt;
+}
+
+// Guarda o estado antes de um "apagar", para o aviso "anular" o repor.
+const UndoContext = createContext(null);
+
 // Apagar pede confirmação no próprio sítio: o primeiro clique mostra
 // "apagar? sim / não" por cima da linha, sem mexer no resto da tabela.
-function DeleteButton({ onConfirm, question = "apagar?" }) {
+function DeleteButton({ onConfirm, question = "apagar?", what = "registo apagado" }) {
   const [asking, setAsking] = useState(false);
+  const rememberForUndo = useContext(UndoContext);
   const small = { padding: "2px 8px", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", background: "none" };
   return (
     <span style={{ position: "relative", display: "flex" }}>
@@ -120,7 +149,7 @@ function DeleteButton({ onConfirm, question = "apagar?" }) {
           }}
         >
           {question}
-          <button autoFocus onClick={() => { setAsking(false); onConfirm(); }} style={{ ...small, border: `1px solid ${RED}`, color: RED }}>
+          <button autoFocus onClick={() => { setAsking(false); if (rememberForUndo) rememberForUndo(what); onConfirm(); }} style={{ ...small, border: `1px solid ${RED}`, color: RED }}>
             sim
           </button>
           <button onClick={() => setAsking(false)} style={{ ...small, border: `1px solid ${LINE}`, color: INK_SOFT }}>
@@ -519,6 +548,27 @@ function FinancasApp() {
     return map;
   }, [incomes, expenses, events]);
 
+  // "apagado · anular": o estado de antes do último apagar, durante 8 s
+  const [undo, setUndo] = useState(null);
+  function rememberForUndo(what) {
+    setUndo({ id: uid(), what, snapshot: { events, incomes, expenses, notes, clients, settings } });
+  }
+  function applyUndo() {
+    const s = undo.snapshot;
+    setEvents(s.events);
+    setIncomes(s.incomes);
+    setExpenses(s.expenses);
+    setNotes(s.notes);
+    setClients(s.clients);
+    setSettings(s.settings);
+    setUndo(null);
+  }
+  useEffect(() => {
+    if (!undo) return;
+    const t = setTimeout(() => setUndo(null), 8000);
+    return () => clearTimeout(t);
+  }, [undo]);
+
   const [backupMsg, setBackupMsg] = useState(null);
   const [pendingImport, setPendingImport] = useState(null);
 
@@ -563,6 +613,7 @@ function FinancasApp() {
   }
 
   return (
+    <UndoContext.Provider value={rememberForUndo}>
     <div>
       {/* Sub-nav horizontal + saldo */}
       <div
@@ -701,7 +752,7 @@ function FinancasApp() {
             />
           )}
           {tab === "notas" && <NotesView notes={notes} setNotes={setNotes} />}
-          {tab === "clientes" && <ClientesView clients={clients} setClients={setClients} usage={clientUsage} />}
+          {tab === "clientes" && <ClientesView clients={clients} setClients={setClients} usage={clientUsage} incomes={incomes} />}
         </>
       )}
 
@@ -711,7 +762,19 @@ function FinancasApp() {
         </p>
       )}
 
-      {remoteNotice && (
+      {undo && (
+        <div
+          role="status"
+          style={{ position: "fixed", bottom: "calc(16px + env(safe-area-inset-bottom, 0px))", left: "50%", transform: "translateX(-50%)", zIndex: 21, display: "flex", alignItems: "center", gap: 12, padding: "8px 10px 8px 14px", background: HILITE, border: `1px solid ${LINE}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}
+        >
+          {undo.what}
+          <button onClick={applyUndo} style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", background: "none", border: `1px solid ${GOLD}`, color: GOLD, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            <RotateCcw size={12} /> anular
+          </button>
+        </div>
+      )}
+
+      {remoteNotice && !undo && (
         <div
           role="status"
           style={{ position: "fixed", bottom: "calc(16px + env(safe-area-inset-bottom, 0px))", left: "50%", transform: "translateX(-50%)", zIndex: 20, padding: "8px 14px", background: HILITE, border: `1px solid ${GOLD}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}
@@ -765,6 +828,7 @@ function FinancasApp() {
         </p>
       </div>
     </div>
+    </UndoContext.Provider>
   );
 }
 
@@ -967,6 +1031,10 @@ function markReceived(list, id) {
 function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, trackStatus, statusLabels, clients, showClient }) {
   const narrow = useIsNarrow();
   const [csvMsg, setCsvMsg] = useState(null);
+  const [onlyNoReceipt, setOnlyNoReceipt] = useState(false);
+  const [receiptEditId, setReceiptEditId] = useState(null);
+  const [receiptValue, setReceiptValue] = useState("");
+  const activeClients = (clients || []).filter((c) => !isEnded(c));
   const hasStatus = !!(trackPaid || trackStatus);
   const hasClient = !!(trackPaid || showClient);
   const labels = statusLabels || { yes: "recebido", no: "pendente" };
@@ -991,6 +1059,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
   }, [items]);
 
   const filtered = items.filter((i) => {
+    if (onlyNoReceipt && !needsReceipt(i)) return false;
     if (filterYear !== "geral" && i.date.slice(0, 4) !== filterYear) return false;
     if (filterMonth !== "geral" && i.date.slice(5, 7) !== filterMonth) return false;
     if (filterClientId !== "geral") {
@@ -1034,7 +1103,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
       recurrence: hasStatus ? recurrence : "compra_unica",
     };
     let next = [...items, newItem];
-    if (trackPaid) {
+    if (hasStatus) {
       next = ensureMonthlyBuffer(next, newItem);
       if (newItem.received !== false) next = maybeSpawnNextAnnual(next, newItem);
     }
@@ -1053,7 +1122,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
   function toggleReceived(id) {
     let next = items.map((i) => (i.id === id ? { ...i, received: !i.received } : i));
     const toggled = next.find((i) => i.id === id);
-    if (trackPaid && toggled && toggled.received !== false) {
+    if (hasStatus && toggled && toggled.received !== false) {
       next = ensureMonthlyBuffer(next, toggled);
       next = maybeSpawnNextAnnual(next, toggled);
     }
@@ -1069,6 +1138,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
       received: item.received !== false,
       clientId: item.clientId || "",
       recurrence: item.recurrence || "compra_unica",
+      receipt: item.receipt || "",
     });
   }
 
@@ -1090,11 +1160,12 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             received: hasStatus ? editForm.received : true,
             clientId: hasClient ? (editForm.clientId || null) : null,
             recurrence: hasStatus ? editForm.recurrence : "compra_unica",
+            ...(trackPaid ? { receipt: editForm.receipt.trim() } : {}),
           }
         : i
     );
     const edited = next.find((i) => i.id === id);
-    if (trackPaid) {
+    if (hasStatus) {
       next = ensureMonthlyBuffer(next, edited);
       if (edited && edited.received !== false) next = maybeSpawnNextAnnual(next, edited);
     }
@@ -1110,7 +1181,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
       const t = String(v ?? "");
       return /[";\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
     };
-    const header = ["data", ...(hasClient ? ["cliente"] : []), hasClient ? "pagamento" : "descrição", "valor", ...(hasStatus ? ["estado", "recorrência"] : [])];
+    const header = ["data", ...(hasClient ? ["cliente"] : []), hasClient ? "pagamento" : "descrição", "valor", ...(hasStatus ? ["estado", "recorrência"] : []), ...(trackPaid ? ["recibo"] : [])];
     const rows = [...filtered]
       .sort((a, b) => (a.date < b.date ? -1 : 1))
       .map((i) => [
@@ -1119,11 +1190,61 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
         i.desc,
         (Number(i.amount) || 0).toFixed(2).replace(".", ","),
         ...(hasStatus ? [i.received === false ? labels.no : labels.yes, recurrenceLabel(i.recurrence || "compra_unica")] : []),
+        ...(trackPaid ? [i.receipt === "passado" ? "sim" : i.receipt || ""] : []),
       ]);
     const csv = "\ufeff" + [header, ...rows].map((r) => r.map(esc).join(";")).join("\r\n");
     const period =
       filterYear !== "geral" ? (filterMonth !== "geral" ? `${filterYear}-${filterMonth}` : filterYear) : filterMonth !== "geral" ? `mes-${filterMonth}` : "tudo";
     setCsvMsg(await saveFile(`innovatweb-${normalizeText(title)}-${period}.csv`, csv, "text/csv"));
+  }
+
+  const noReceiptCount = trackPaid ? items.filter(needsReceipt).length : 0;
+
+  function saveReceipt(id) {
+    setItems(items.map((i) => (i.id === id ? { ...i, receipt: receiptValue.trim() || "passado" } : i)));
+    setReceiptEditId(null);
+    setReceiptValue("");
+  }
+
+  // recibo verde de uma receita recebida com cliente: "sem recibo" → nº
+  function renderReceipt(item) {
+    if (!trackPaid || item.received === false || !item.clientId) return null;
+    const mono = { fontSize: 10, fontFamily: "'IBM Plex Mono', monospace" };
+    if (receiptEditId === item.id) {
+      return (
+        <span style={{ display: "inline-flex", gap: 4, alignItems: "center", marginTop: 4 }}>
+          <input
+            id={`recibo-${item.id}`}
+            autoFocus
+            value={receiptValue}
+            onChange={(e) => setReceiptValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveReceipt(item.id);
+              if (e.key === "Escape") setReceiptEditId(null);
+            }}
+            placeholder="nº recibo (opcional)"
+            aria-label="número do recibo"
+            style={{ ...mono, fontSize: 11, width: 130, padding: "3px 6px", border: `1px solid ${GOLD}`, background: PAPER, color: INK }}
+          />
+          <button onClick={() => saveReceipt(item.id)} style={{ ...mono, padding: "3px 8px", background: INK, color: PAPER, border: "none" }}>
+            ok
+          </button>
+        </span>
+      );
+    }
+    const start = () => {
+      setReceiptEditId(item.id);
+      setReceiptValue(item.receipt && item.receipt !== "passado" ? item.receipt : "");
+    };
+    return item.receipt ? (
+      <button onClick={start} title="editar recibo" style={{ ...mono, display: "inline-flex", alignItems: "center", gap: 3, marginTop: 3, padding: 0, background: "none", border: "none", color: GREEN }}>
+        <FileText size={10} /> {item.receipt === "passado" ? "recibo passado" : `recibo ${item.receipt}`}
+      </button>
+    ) : (
+      <button onClick={start} style={{ ...mono, display: "inline-flex", alignItems: "center", gap: 3, marginTop: 3, padding: "1px 6px", background: "none", border: `1px dashed ${GOLD}`, color: GOLD }}>
+        <FileText size={10} /> sem recibo
+      </button>
+    );
   }
 
   function renderStatus(item) {
@@ -1161,7 +1282,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             style={{ flex: "1 1 140px", padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
           >
             <option value="">sem cliente</option>
-            {(clients || []).map((c) => (
+            {activeClients.map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
@@ -1279,6 +1400,15 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
             Geral
           </button>
         )}
+        {trackPaid && (noReceiptCount > 0 || onlyNoReceipt) && (
+          <button
+            onClick={() => setOnlyNoReceipt(!onlyNoReceipt)}
+            aria-pressed={onlyNoReceipt}
+            style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px", border: `1px solid ${onlyNoReceipt ? GOLD : LINE}`, background: onlyNoReceipt ? HILITE : CARD, fontSize: 12, color: GOLD, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <FileText size={12} /> sem recibo ({noReceiptCount})
+          </button>
+        )}
         <button
           onClick={exportCsv}
           disabled={filtered.length === 0}
@@ -1337,7 +1467,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
                       style={{ flex: "1 1 130px", padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
                     >
                       <option value="">sem cliente</option>
-                      {(clients || []).map((c) => (
+                      {(clients || []).filter((c) => !isEnded(c) || c.id === editForm.clientId).map((c) => (
                         <option key={c.id} value={c.id}>{c.name}</option>
                       ))}
                     </select>
@@ -1370,6 +1500,15 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
                         <option key={r.value} value={r.value}>{r.label}</option>
                       ))}
                     </select>
+                  )}
+                  {trackPaid && (
+                    <input
+                      value={editForm.receipt}
+                      onChange={(e) => setEditForm({ ...editForm, receipt: e.target.value })}
+                      placeholder="nº recibo"
+                      aria-label="número do recibo"
+                      style={{ width: 120, padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                    />
                   )}
                   {hasStatus && (
                     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -1404,13 +1543,14 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
                     {item.date.split("-").reverse().join("/")}
                     {hasClient && clientName(item.clientId) ? ` · ${item.desc}` : ""}
                     {item.recurrence && item.recurrence !== "compra_unica" ? ` · ${recurrenceLabel(item.recurrence).toLowerCase()}` : ""}
+                    {renderReceipt(item) && <><br />{renderReceipt(item)}</>}
                   </span>
                   <span style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
                     {hasStatus && renderStatus(item)}
                     <button onClick={() => startEdit(item)} style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }} aria-label="editar">
                       <Pencil size={14} />
                     </button>
-                    <DeleteButton onConfirm={() => removeItem(item.id)} />
+                    <DeleteButton onConfirm={() => removeItem(item.id)} what={trackPaid ? "receita apagada" : "despesa apagada"} />
                   </span>
                 </div>
               </div>
@@ -1435,7 +1575,10 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
                   {clientName(item.clientId) || "—"}
                 </span>
               )}
-              <span>{item.desc}</span>
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                {item.desc}
+                {renderReceipt(item)}
+              </span>
               <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: accent, fontWeight: 600 }}>
                 {fmtEUR(item.amount)}
               </span>
@@ -1460,7 +1603,7 @@ function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, tr
                 >
                   <Pencil size={14} />
                 </button>
-                <DeleteButton onConfirm={() => removeItem(item.id)} />
+                <DeleteButton onConfirm={() => removeItem(item.id)} what={trackPaid ? "receita apagada" : "despesa apagada"} />
               </span>
             </div>
             )
@@ -1534,7 +1677,7 @@ function emptyClientForm() {
     email: "",
     status: "mensal",
     contractValue: "",
-    serviceType: "redes_sociais",
+    serviceType: "",
     contractStart: "",
     contractEnd: "",
   };
@@ -1621,7 +1764,12 @@ function ClientForm({ value, onChange, idPrefix }) {
       </div>
       <div style={{ gridColumn: "1 / -1" }}>
         <label style={fieldLabelStyle}>Tipo de serviço</label>
-        <select value={value.serviceType} onChange={(e) => onChange({ ...value, serviceType: e.target.value })} style={inputStyle}>
+        <select
+          value={value.serviceType}
+          onChange={(e) => onChange({ ...value, serviceType: e.target.value })}
+          style={{ ...inputStyle, borderColor: value.serviceType ? LINE : GOLD, color: value.serviceType ? INK : GOLD }}
+        >
+          <option value="" disabled>— escolhe o tipo de serviço —</option>
           {SERVICE_OPTIONS.map((s) => (
             <option key={s.value} value={s.value}>{s.label}</option>
           ))}
@@ -1640,15 +1788,34 @@ const fieldLabelStyle = {
   textTransform: "lowercase",
 };
 
-function ClientesView({ clients, setClients, usage }) {
+function ClientesView({ clients, setClients, usage, incomes }) {
   const [form, setForm] = useState(emptyClientForm());
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(emptyClientForm());
+  const [formError, setFormError] = useState("");
+  const [editError, setEditError] = useState("");
+  const [showEnded, setShowEnded] = useState(false);
 
-  const sorted = [...clients].sort((a, b) => a.name.localeCompare(b.name, "pt"));
+  const byName = (a, b) => a.name.localeCompare(b.name, "pt");
+  const active = clients.filter((c) => !isEnded(c)).sort(byName);
+  const ended = clients.filter(isEnded).sort(byName);
+  const sorted = showEnded ? [...active, ...ended] : active;
+  const mrr = active.reduce((s, c) => s + monthlyValue(c.id, incomes), 0);
+
+  function setEnded(id, value) {
+    setClients(clients.map((c) => (c.id === id ? { ...c, ended: value } : c)));
+  }
 
   function addClient() {
-    if (!form.name.trim()) return;
+    if (!form.name.trim()) {
+      setFormError("Escreve o nome do cliente.");
+      return;
+    }
+    if (!form.serviceType) {
+      setFormError("Escolhe o tipo de serviço — é o que conta para os objetivos.");
+      return;
+    }
+    setFormError("");
     setClients([
       ...clients,
       {
@@ -1680,7 +1847,7 @@ function ClientesView({ clients, setClients, usage }) {
       email: c.email || "",
       status: c.status || "mensal",
       contractValue: c.contractValue ?? "",
-      serviceType: c.serviceType || "redes_sociais",
+      serviceType: c.serviceType || "",
       contractStart: c.contractStart || "",
       contractEnd: c.contractEnd || "",
     });
@@ -1688,10 +1855,16 @@ function ClientesView({ clients, setClients, usage }) {
 
   function cancelEdit() {
     setEditingId(null);
+    setEditError("");
   }
 
   function saveEdit(id) {
     if (!editForm.name.trim()) return;
+    if (!editForm.serviceType) {
+      setEditError("Escolhe o tipo de serviço antes de guardar.");
+      return;
+    }
+    setEditError("");
     setClients(
       clients.map((c) =>
         c.id === id
@@ -1723,10 +1896,31 @@ function ClientesView({ clients, setClients, usage }) {
         >
           <Plus size={14} /> adicionar cliente
         </button>
+        {formError && <p style={{ margin: "8px 0 0", fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{formError}</p>}
       </div>
 
+      {clients.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", alignItems: "baseline", marginBottom: 12, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+          <span>
+            <span style={{ color: INK, fontWeight: 600 }}>{active.length}</span> cliente{active.length === 1 ? "" : "s"} ativo{active.length === 1 ? "" : "s"}
+          </span>
+          <span>
+            receita mensal garantida: <span style={{ color: GREEN, fontWeight: 600 }}>{fmtEUR(mrr)}</span>/mês
+          </span>
+          {ended.length > 0 && (
+            <button
+              onClick={() => setShowEnded(!showEnded)}
+              aria-pressed={showEnded}
+              style={{ marginLeft: "auto", padding: "4px 10px", background: "none", border: `1px solid ${LINE}`, color: INK_SOFT, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+            >
+              {showEnded ? "esconder terminados" : `ver terminados (${ended.length})`}
+            </button>
+          )}
+        </div>
+      )}
+
       {sorted.length === 0 ? (
-        <p style={{ color: INK_SOFT, fontSize: 14 }}>Ainda não tens clientes registados.</p>
+        <p style={{ color: INK_SOFT, fontSize: 14 }}>{clients.length ? "Não tens clientes ativos." : "Ainda não tens clientes registados."}</p>
       ) : (
         <div style={{ border: `1px solid ${LINE}`, background: CARD }}>
           {sorted.map((c) => (
@@ -1734,6 +1928,7 @@ function ClientesView({ clients, setClients, usage }) {
               {editingId === c.id ? (
                 <div>
                   <ClientForm value={editForm} onChange={setEditForm} />
+                  {editError && <p style={{ margin: "8px 0 0", fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{editError}</p>}
                   <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                     <button onClick={() => saveEdit(c.id)} style={{ padding: "6px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
                       guardar
@@ -1744,9 +1939,17 @@ function ClientesView({ clients, setClients, usage }) {
                   </div>
                 </div>
               ) : (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, opacity: isEnded(c) ? 0.6 : 1 }}>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 600 }}>{c.name}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14, fontWeight: 600 }}>{c.name}</span>
+                      {isEnded(c) && (
+                        <span style={{ fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, border: `1px solid ${LINE}`, padding: "1px 6px", borderRadius: 2 }}>terminado</span>
+                      )}
+                      {!isEnded(c) && monthlyValue(c.id, incomes) > 0 && (
+                        <span style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: GREEN }}>{fmtEUR(monthlyValue(c.id, incomes))}/mês</span>
+                      )}
+                    </div>
                     <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 4 }}>
                       {c.phone && (
                         <span style={{ fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace", display: "flex", alignItems: "center", gap: 5 }}>
@@ -1765,10 +1968,17 @@ function ClientesView({ clients, setClients, usage }) {
                           {statusLabel(c.status)}
                         </span>
                       )}
-                      {c.serviceType && (
+                      {c.serviceType ? (
                         <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, border: `1px solid ${LINE}`, padding: "2px 7px", borderRadius: 2 }}>
                           {serviceLabel(c.serviceType)}
                         </span>
+                      ) : (
+                        <button
+                          onClick={() => startEdit(c)}
+                          style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: GOLD, background: "none", border: `1px dashed ${GOLD}`, padding: "2px 7px", borderRadius: 2 }}
+                        >
+                          sem tipo de serviço — escolher
+                        </button>
                       )}
                       {!!c.contractValue && (
                         <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: GREEN, border: `1px solid ${LINE}`, padding: "2px 7px", borderRadius: 2 }}>
@@ -1783,11 +1993,18 @@ function ClientesView({ clients, setClients, usage }) {
                     </div>
                     {c.note && <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 6 }}>{c.note}</div>}
                   </div>
-                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
+                    <button
+                      onClick={() => setEnded(c.id, !isEnded(c))}
+                      style={{ padding: "2px 8px", background: "none", border: `1px solid ${LINE}`, color: INK_SOFT, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}
+                    >
+                      {isEnded(c) ? "reativar" : "terminar"}
+                    </button>
                     <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="editar">
                       <Pencil size={14} />
                     </button>
                     <DeleteButton
+                      what="cliente apagado"
                       onConfirm={() => removeClient(c.id)}
                       question={usage[c.id] ? `tem ${usage[c.id]} registo${usage[c.id] === 1 ? "" : "s"} ligado${usage[c.id] === 1 ? "" : "s"}, que fica${usage[c.id] === 1 ? "" : "m"} sem cliente. apagar?` : "apagar cliente?"}
                     />
@@ -1973,7 +2190,7 @@ function NotesView({ notes, setNotes }) {
                   <button onClick={() => startEdit(n)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="editar">
                     <Pencil size={14} />
                   </button>
-                  <DeleteButton onConfirm={() => removeNote(n.id)} />
+                  <DeleteButton onConfirm={() => removeNote(n.id)} what="nota apagada" />
                 </div>
               )}
             </div>
@@ -2124,6 +2341,11 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
       map[e.clientId].gasto += Number(e.amount) || 0;
     });
     return Object.values(map)
+      .filter((row) => {
+        // clientes terminados só aparecem se tiveram movimento no período
+        const c = (clients || []).find((c) => c.id === row.id);
+        return !(c && isEnded(c) && !row.ganho && !row.gasto && !row.horas);
+      })
       .map((row) => {
         const liquido = row.ganho - row.gasto;
         return { ...row, liquido, lucro: liquido - row.horas * HOURLY_RATE };
@@ -2140,6 +2362,7 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
   const totalUnpaid = unpaidExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
   const forecast = balance + totalPending - totalUnpaid;
 
+  const missingReceipts = incomes.filter(needsReceipt).length;
   const taxPct = Number(settings.taxReserve) || 0;
   const taxAmount = balance > 0 ? (balance * taxPct) / 100 : 0;
 
@@ -2183,6 +2406,11 @@ function BalancoView({ incomes, setIncomes, expenses, events, clients, settings,
           <span>
             pôr de parte para impostos ({String(taxPct).replace(".", ",")}%): <span style={{ color: GOLD }}>{fmtEUR(taxAmount)}</span> · livre para gastar:{" "}
             <span style={{ color: GREEN }}>{fmtEUR(balance - taxAmount)}</span>
+          </span>
+        )}
+        {missingReceipts > 0 && (
+          <span style={{ color: GOLD }}>
+            {missingReceipts} receita{missingReceipts === 1 ? "" : "s"} recebida{missingReceipts === 1 ? "" : "s"} sem recibo registado
           </span>
         )}
       </div>
@@ -2615,7 +2843,7 @@ function GoalsCard({ clients, incomes, settings, setSettings }) {
                 <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, whiteSpace: "nowrap" }}>
                   <span style={{ fontSize: 17, fontWeight: 700, color: done ? GREEN : INK }}>{sold.length}</span> de {g.target}
                 </span>
-                <DeleteButton onConfirm={() => removeGoal(g.id)} question="apagar objetivo?" />
+                <DeleteButton onConfirm={() => removeGoal(g.id)} question="apagar objetivo?" what="objetivo apagado" />
               </span>
             </div>
             <div
@@ -2822,7 +3050,7 @@ function CalendarView({ events, setEvents, clients }) {
             style={{ flex: "1 1 140px", padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
           >
             <option value="">sem cliente</option>
-            {(clients || [])
+            {(clients || []).filter((c) => !isEnded(c))
               .map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
@@ -2867,7 +3095,7 @@ function CalendarView({ events, setEvents, clients }) {
                         style={{ flex: "1 1 130px", padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
                       >
                         <option value="">sem cliente</option>
-                        {(clients || [])
+                        {(clients || []).filter((c) => !isEnded(c) || c.id === editForm.clientId)
                           .map((c) => (
                             <option key={c.id} value={c.id}>{c.name}</option>
                           ))}
@@ -2917,7 +3145,7 @@ function CalendarView({ events, setEvents, clients }) {
                   <button onClick={() => startEdit(ev)} style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }} aria-label="editar">
                     <Pencil size={14} />
                   </button>
-                  <DeleteButton onConfirm={() => removeEvent(ev.id)} />
+                  <DeleteButton onConfirm={() => removeEvent(ev.id)} what="registo do calendário apagado" />
                 </span>
               </div>
               );
@@ -2930,4 +3158,4 @@ function CalendarView({ events, setEvents, clients }) {
 }
 
 // usadas pelos testes (App.test.jsx)
-export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText, salesInMonth };
+export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText, salesInMonth, isEnded, monthlyValue, needsReceipt };
