@@ -1,0 +1,3428 @@
+import { useState, useEffect, useMemo, useRef, createContext, useContext } from "react";
+import { Plus, Trash2, ChevronLeft, ChevronRight, CalendarDays, TrendingUp, TrendingDown, Scale, NotebookPen, Landmark, Receipt, BarChart3, Pencil, Users, Phone, Mail, Download, Upload, Clock, Search, Check, Settings, RotateCcw, FileText } from "lucide-react";
+import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
+
+const MONTHS_ABBR = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+
+const PAPER = "#050805";
+const INK = "#F3F5F1";
+const INK_SOFT = "#8B948A";
+const GOLD = "#D8A73A";
+const RED = "#E2604A";
+const LINE = "#1E221C";
+const CARD = "#0E100C";
+const GREEN = "#3FB87F";
+const HILITE = "#171A13";
+
+const MONTHS_PT = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+const DAYS_PT = ["Seg","Ter","Qua","Qui","Sex","Sáb","Dom"];
+
+// data local (não UTC): toISOString daria o dia anterior entre a meia-noite e a 1h em PT
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function fmtEUR(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString("pt-PT", { style: "currency", currency: "EUR" });
+}
+
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+// aceita "123,45", "123.45", "1.500", "1.500,50", "1 500 €"
+function parseNum(str) {
+  if (str === null || str === undefined) return NaN;
+  let s = String(str).trim().replace(/[\s€]/g, "");
+  if (s === "") return NaN;
+  if (s.includes(",")) {
+    // vírgula é a casa decimal; pontos só podem ser separadores de milhares
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) {
+    // "1.500" ou "12.000.000": pontos de milhares, não decimais
+    s = s.replace(/\./g, "");
+  }
+  return Number(s);
+}
+
+// Guarda um ficheiro no computador de quem usa a app. Dentro do claude.ai
+// passa pela capability "downloads" (pede confirmação); fora, link normal.
+async function saveFile(filename, data, mime) {
+  try {
+    const downloads = window.claude && window.claude.use ? await window.claude.use("downloads") : null;
+    if (downloads) {
+      await downloads.save({ filename, data });
+    } else {
+      const url = URL.createObjectURL(new Blob([data], { type: mime }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+    return { ok: true, text: `Ficheiro guardado: ${filename}` };
+  } catch (e) {
+    return { ok: false, text: e && e.code === "declined" ? "Cancelado." : "Não foi possível guardar o ficheiro." };
+  }
+}
+
+// true em ecrãs estreitos (telemóvel): as tabelas passam a cartões
+function useIsNarrow(maxWidth = 640) {
+  const query = `(max-width: ${maxWidth}px)`;
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && !!window.matchMedia && window.matchMedia(query).matches);
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia(query);
+    const onChange = () => setNarrow(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return narrow;
+}
+
+// compara sem acentos nem maiúsculas ("Café" encontra "cafe")
+function normalizeText(s) {
+  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// Um cliente está terminado se o marcaste assim ou se o contrato já acabou
+// (a não ser que o tenhas reativado).
+function isEnded(client) {
+  if (client.ended === true) return true;
+  if (client.ended === false) return false;
+  return !!client.contractEnd && client.contractEnd < todayISO();
+}
+
+// Quanto um cliente paga por mês: o valor mais recente de cada série mensal
+// (mesma descrição) nas receitas desse cliente.
+function monthlyValue(clientId, incomes) {
+  const latest = {};
+  incomes
+    .filter((i) => i.clientId === clientId && i.recurrence === "mensal")
+    .forEach((i) => {
+      if (!latest[i.desc] || i.date > latest[i.desc].date) latest[i.desc] = i;
+    });
+  return Object.values(latest).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+}
+
+// receita recebida de um cliente para a qual ainda não registaste o recibo
+function needsReceipt(income) {
+  return income.received !== false && !!income.clientId && !income.receipt;
+}
+
+// Guarda o estado antes de um "apagar", para o aviso "anular" o repor.
+const UndoContext = createContext(null);
+
+// Apagar pede confirmação no próprio sítio: o primeiro clique mostra
+// "apagar? sim / não" por cima da linha, sem mexer no resto da tabela.
+function DeleteButton({ onConfirm, question = "apagar?", what = "registo apagado" }) {
+  const [asking, setAsking] = useState(false);
+  const rememberForUndo = useContext(UndoContext);
+  const small = { padding: "2px 8px", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", background: "none" };
+  return (
+    <span style={{ position: "relative", display: "flex" }}>
+      <button onClick={() => setAsking(true)} style={{ background: "none", border: "none", color: asking ? RED : INK_SOFT, display: "flex" }} aria-label="remover">
+        <Trash2 size={14} />
+      </button>
+      {asking && (
+        <span
+          role="alertdialog"
+          style={{
+            position: "absolute",
+            right: 0,
+            top: "50%",
+            transform: "translateY(-50%)",
+            zIndex: 5,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "5px 8px",
+            background: CARD,
+            border: `1px solid ${RED}`,
+            whiteSpace: "nowrap",
+            fontSize: 11,
+            fontFamily: "'IBM Plex Mono', monospace",
+            color: INK,
+          }}
+        >
+          {question}
+          <button autoFocus onClick={() => { setAsking(false); if (rememberForUndo) rememberForUndo(what); onConfirm(); }} style={{ ...small, border: `1px solid ${RED}`, color: RED }}>
+            sim
+          </button>
+          <button onClick={() => setAsking(false)} style={{ ...small, border: `1px solid ${LINE}`, color: INK_SOFT }}>
+            não
+          </button>
+        </span>
+      )}
+    </span>
+  );
+}
+
+const STORAGE_KEY = "controlo-pessoal-data";
+
+// Definições editáveis no Balanço e guardadas junto com os dados: taxa horária
+// da mão de obra, mês a partir do qual conta a margem, % do saldo a pôr de
+// parte para impostos e objetivos de vendas por mês ([{ id, type, target }]).
+const DEFAULT_SETTINGS = { hourlyRate: 15, marginStart: "2026-09-01", taxReserve: 25, goals: [] };
+
+// junta o que está guardado aos valores por omissão (e larga o antigo
+// objetivo em dinheiro, que deu lugar aos objetivos de vendas)
+function withDefaults(saved) {
+  const { monthlyGoal, ...rest } = saved || {};
+  return { ...DEFAULT_SETTINGS, ...rest };
+}
+
+// Dados de partida — só usados quando ainda não há nada guardado. Espelham o
+// livro real a 24/09/2026 e já incluem o efeito das correções automáticas
+// ("migrações") das versões anteriores, cujos ids ficam em `migrations`.
+const SEED_DATA = {
+  events: [
+    {
+      id: "mjxz8g8n",
+      date: "2026-09-05",
+      text: "Trabalho para Frangos e Companhia",
+      hours: 1,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "5u3yxjnh",
+      date: "2026-09-12",
+      text: "Trabalho para Frangos e Companhia",
+      hours: 1,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "i31ign8i",
+      date: "2026-09-06",
+      text: "Trabalho para Escondidinho",
+      hours: 1,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "b0lquxvg",
+      date: "2026-09-13",
+      text: "Trabalho para Escondidinho",
+      hours: 1,
+      clientId: "tpassy9p"
+    }
+  ],
+  incomes: [
+    {
+      id: "1ymso1ro",
+      desc: "Receita de maio",
+      amount: 400,
+      date: "2026-05-01",
+      received: true,
+      clientId: null
+    },
+    {
+      id: "u4x9yltq",
+      desc: "Receita de junho",
+      amount: 200,
+      date: "2026-06-01",
+      received: true,
+      clientId: null
+    },
+    {
+      id: "zeqsfkbm",
+      desc: "Receita de julho",
+      amount: 200,
+      date: "2026-07-01",
+      received: true,
+      clientId: null
+    },
+    {
+      id: "3b6i18ci",
+      desc: "Pagamento",
+      amount: 200,
+      date: "2026-08-01",
+      received: true,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "g9ct9ymv",
+      desc: "Site",
+      amount: 325,
+      date: "2026-08-01",
+      received: true,
+      clientId: "pichfboa"
+    },
+    {
+      id: "vrj7vcug",
+      desc: "Pagamento",
+      amount: 100,
+      date: "2026-08-01",
+      received: true,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "p1izra09",
+      desc: "Pagamento",
+      amount: 200,
+      date: "2026-09-01",
+      received: true,
+      clientId: "ajxztgv5"
+    },
+    {
+      id: "esmens09",
+      desc: "mensalidade",
+      amount: 250,
+      date: "2026-09-01",
+      received: true,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "escart15",
+      desc: "cartoes visita",
+      amount: 150,
+      date: "2026-09-15",
+      received: true,
+      clientId: "tpassy9p"
+    },
+    {
+      id: "espsite18",
+      desc: "site",
+      amount: 350,
+      date: "2026-09-18",
+      received: false,
+      clientId: "espomec1"
+    },
+    {
+      id: "prelab19",
+      desc: "Pagamento",
+      amount: 1500,
+      date: "2026-09-19",
+      received: false,
+      clientId: "prelabt1"
+    },
+    {
+      id: "frout01",
+      desc: "Pagamento",
+      amount: 200,
+      date: "2026-10-01",
+      received: false,
+      clientId: "ajxztgv5",
+      recurrence: "mensal"
+    },
+    {
+      id: "esout01",
+      desc: "Pagamento",
+      amount: 250,
+      date: "2026-10-01",
+      received: false,
+      clientId: "tpassy9p",
+      recurrence: "mensal"
+    }
+  ],
+  expenses: [
+    {
+      id: "8dukld3y",
+      desc: "Site (despesa associada)",
+      amount: 25,
+      date: "2026-08-01",
+      received: true,
+      clientId: "pichfboa"
+    },
+    {
+      id: "76hl7ri5",
+      desc: "Despesa associada",
+      amount: 100,
+      date: "2026-09-01",
+      received: true,
+      clientId: "ajxztgv5"
+    }
+  ],
+  notes: [
+    {
+      id: "wpm9osnb",
+      text: "Escondidinho deve 150€ de cartões (setembro), mais 250€ de gravações e 50€ de publicidade.\nTotal:550€",
+      date: "2026-09-01",
+      closed: true
+    },
+    {
+      id: "esago14n",
+      text: "escondidinho deve 100€ mes de agosto",
+      date: "2026-09-14",
+      closed: true
+    }
+  ],
+  clients: [
+    {
+      id: "l42lug6o",
+      name: "Amariaviaja",
+      contact: "",
+      note: "Abril: 400€ ganhos — finalizado",
+      contractStart: "2026-04-01",
+      contractEnd: "2026-04-30"
+    },
+    {
+      id: "ajxztgv5",
+      name: "Frangos e Companhia",
+      contact: "",
+      note: "",
+      serviceType: "redes_sociais",
+      status: "mensal",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "tpassy9p",
+      name: "Escondidinho",
+      contact: "",
+      note: "",
+      serviceType: "redes_sociais",
+      status: "mensal",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "pichfboa",
+      name: "pichelaria fonte boa",
+      note: "",
+      phone: "",
+      email: "",
+      serviceType: "site",
+      status: "compra_unica",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "espomec1",
+      name: "espomecanica",
+      note: "",
+      phone: "",
+      email: "",
+      serviceType: "site",
+      status: "compra_unica",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    },
+    {
+      id: "prelabt1",
+      name: "prelabt- gestão de produtos quimicos",
+      note: "",
+      phone: "",
+      email: "",
+      status: "compra_unica",
+      contractValue: 0,
+      contractStart: "",
+      contractEnd: ""
+    }
+  ],
+  migrations: [
+    "hist-mai-jun-jul-2026",
+    "set-2026-frangos-escondidinho",
+    "remove-escondidinho-ago-nao-pago",
+    "add-cliente-amariaviaja",
+    "patch-cliente-amariaviaja-fim-contrato",
+    "add-clientes-frangos-escondidinho",
+    "set-2026-horas-frangos-escondidinho",
+    "add-escondidinho-pendente-ago",
+    "link-clientes-antigos-receitas",
+    "link-clientes-antigos-despesas"
+  ]
+};
+
+function FinancasApp() {
+  const [tab, setTab] = useState("calendario");
+  const [loaded, setLoaded] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+
+  const [events, setEvents] = useState(SEED_DATA.events);
+  const [incomes, setIncomes] = useState(SEED_DATA.incomes);
+  const [expenses, setExpenses] = useState(SEED_DATA.expenses);
+  const [notes, setNotes] = useState(SEED_DATA.notes);
+  const [clients, setClients] = useState(SEED_DATA.clients);
+  const [migrations, setMigrations] = useState(SEED_DATA.migrations);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  // último valor igual ao que está guardado (lido ou gravado): evita regravar
+  // o que acabou de chegar de outro aparelho
+  const lastSynced = useRef(null);
+  const [remoteNotice, setRemoteNotice] = useState(false);
+
+  // Load persisted data on mount
+  useEffect(() => {
+    (async () => {
+      let loadedEvents = null;
+      let loadedIncomes = null;
+      let loadedExpenses = null;
+      let loadedNotes = null;
+      let loadedClients = null;
+      let loadedMigrations = [];
+      try {
+        const result = await window.storage.get(STORAGE_KEY, true);
+        if (result && result.value) {
+          const parsed = JSON.parse(result.value);
+          lastSynced.current = result.value;
+          if (parsed.settings) setSettings(withDefaults(parsed.settings));
+          loadedEvents = parsed.events || [];
+          loadedIncomes = parsed.incomes || [];
+          loadedExpenses = parsed.expenses || [];
+          loadedNotes = parsed.notes || [];
+          loadedClients = parsed.clients || [];
+          loadedMigrations = parsed.migrations || [];
+        }
+      } catch (e) {
+        // key doesn't exist yet — fine, start empty
+      } finally {
+        // Sem nada guardado, começa pelos dados de partida. A lista `migrations`
+        // já não é usada por esta versão, mas continua a ser guardada: versões
+        // antigas da app (que aplicavam essas correções automáticas) veem-nas
+        // como já feitas e não as repetem por cima dos dados.
+        const hasSaved = loadedIncomes !== null;
+        setEvents(hasSaved ? loadedEvents : SEED_DATA.events);
+        setIncomes(hasSaved ? loadedIncomes : SEED_DATA.incomes);
+        setExpenses(hasSaved ? loadedExpenses : SEED_DATA.expenses);
+        setNotes(hasSaved ? loadedNotes : SEED_DATA.notes);
+        setClients(hasSaved ? loadedClients : SEED_DATA.clients);
+        setMigrations(hasSaved ? loadedMigrations : SEED_DATA.migrations);
+        setLoaded(true);
+      }
+    })();
+  }, []);
+
+  // Alterações feitas noutro separador/aparelho aparecem aqui sem recarregar,
+  // para um separador antigo nunca gravar dados velhos por cima dos novos.
+  useEffect(() => {
+    if (!loaded || !window.storage.subscribe) return;
+    let noticeTimer = null;
+    const unsubscribe = window.storage.subscribe(STORAGE_KEY, (value) => {
+      if (value === lastSynced.current) return;
+      let parsed;
+      try {
+        parsed = JSON.parse(value);
+      } catch (e) {
+        return;
+      }
+      lastSynced.current = value;
+      setEvents(parsed.events || []);
+      setIncomes(parsed.incomes || []);
+      setExpenses(parsed.expenses || []);
+      setNotes(parsed.notes || []);
+      setClients(parsed.clients || []);
+      setMigrations(parsed.migrations || []);
+      setSettings(withDefaults(parsed.settings));
+      setRemoteNotice(true);
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => setRemoteNotice(false), 4000);
+    });
+    return () => {
+      clearTimeout(noticeTimer);
+      unsubscribe();
+    };
+  }, [loaded]);
+
+  // Persist whenever data changes (after initial load)
+  useEffect(() => {
+    if (!loaded) return;
+    const payload = JSON.stringify({ events, incomes, expenses, notes, clients, migrations, settings });
+    if (payload === lastSynced.current) return;
+    lastSynced.current = payload;
+    (async () => {
+      try {
+        const res = await window.storage.set(STORAGE_KEY, payload, true);
+        setSaveError(!res);
+      } catch (e) {
+        setSaveError(true);
+      }
+    })();
+  }, [events, incomes, expenses, notes, clients, migrations, settings, loaded]);
+
+  const totalIncome = useMemo(() => incomes.filter((i) => i.received !== false).reduce((s, i) => s + (Number(i.amount) || 0), 0), [incomes]);
+  const totalExpense = useMemo(() => expenses.filter((e) => e.received !== false).reduce((s, e) => s + (Number(e.amount) || 0), 0), [expenses]);
+  const balance = totalIncome - totalExpense;
+
+  // quantos registos (receitas, despesas, horas) cada cliente tem ligados
+  const clientUsage = useMemo(() => {
+    const map = {};
+    [...incomes, ...expenses, ...events].forEach((r) => {
+      if (r.clientId) map[r.clientId] = (map[r.clientId] || 0) + 1;
+    });
+    return map;
+  }, [incomes, expenses, events]);
+
+  // "apagado · anular": o estado de antes do último apagar, durante 8 s
+  const [undo, setUndo] = useState(null);
+  function rememberForUndo(what) {
+    setUndo({ id: uid(), what, snapshot: { events, incomes, expenses, notes, clients, settings } });
+  }
+  function applyUndo() {
+    const s = undo.snapshot;
+    setEvents(s.events);
+    setIncomes(s.incomes);
+    setExpenses(s.expenses);
+    setNotes(s.notes);
+    setClients(s.clients);
+    setSettings(s.settings);
+    setUndo(null);
+  }
+  useEffect(() => {
+    if (!undo) return;
+    const t = setTimeout(() => setUndo(null), 8000);
+    return () => clearTimeout(t);
+  }, [undo]);
+
+  const [backupMsg, setBackupMsg] = useState(null);
+  const [pendingImport, setPendingImport] = useState(null);
+
+  async function exportBackup() {
+    const data = JSON.stringify({ app: "innovatweb-financas", exportedAt: new Date().toISOString(), events, incomes, expenses, notes, clients, migrations, settings }, null, 2);
+    setBackupMsg(await saveFile(`innovatweb-financas-${todayISO()}.json`, data, "application/json"));
+  }
+
+  // receitas pendentes cuja data já passou (número no separador Balanço)
+  const overdueCount = incomes.filter((i) => i.received === false && i.date < todayISO()).length;
+  const [query, setQuery] = useState("");
+  const searching = query.trim().length >= 2;
+
+  function readBackup(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!Array.isArray(parsed.incomes) || !Array.isArray(parsed.expenses) || !Array.isArray(parsed.clients)) throw new Error("formato");
+        setPendingImport({ name: file.name, data: parsed });
+        setBackupMsg(null);
+      } catch (e) {
+        setPendingImport(null);
+        setBackupMsg({ ok: false, text: "Este ficheiro não é uma cópia desta app." });
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function applyImport() {
+    const d = pendingImport.data;
+    setEvents(d.events || []);
+    setIncomes(d.incomes || []);
+    setExpenses(d.expenses || []);
+    setNotes(d.notes || []);
+    setClients(d.clients || []);
+    setMigrations(d.migrations || SEED_DATA.migrations);
+    setSettings(withDefaults(d.settings));
+    setBackupMsg({ ok: true, text: `Dados repostos a partir de ${pendingImport.name}.` });
+    setPendingImport(null);
+  }
+
+  return (
+    <UndoContext.Provider value={rememberForUndo}>
+    <div>
+      {/* Sub-nav horizontal + saldo */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+          marginBottom: 24,
+          paddingBottom: 14,
+          borderBottom: `1px solid ${LINE}`,
+        }}
+      >
+        <nav style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {[
+            ["calendario", "Calendário", <CalendarDays size={14} />],
+            ["balanco", "Balanço", <BarChart3 size={14} />],
+            ["faturacao", "Faturação", <TrendingUp size={14} />],
+            ["receitas", "Receitas", <Landmark size={14} />],
+            ["despesas", "Despesas", <Receipt size={14} />],
+            ["notas", "Notas", <NotebookPen size={14} />],
+            ["clientes", "Clientes", <Users size={14} />],
+          ].map(([key, label, icon]) => {
+            const badge = key === "notas" ? notes.filter((n) => !n.closed).length : key === "balanco" ? overdueCount : 0;
+            const badgeTitle = key === "notas" ? `${badge} nota(s) por fechar` : `${badge} pagamento(s) em atraso`;
+            return (
+              <button
+                key={key}
+                onClick={() => { setTab(key); setQuery(""); }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  background: tab === key ? HILITE : "none",
+                  border: "none",
+                  borderBottom: tab === key ? `2px solid ${GOLD}` : "2px solid transparent",
+                  padding: "8px 10px",
+                  fontFamily: "'Manrope', sans-serif",
+                  fontSize: 13,
+                  color: tab === key && !searching ? INK : INK_SOFT,
+                  fontWeight: tab === key && !searching ? 600 : 400,
+                  textAlign: "left",
+                  position: "relative",
+                }}
+              >
+                {icon} {label}
+                {badge > 0 && (
+                  <span
+                    title={badgeTitle}
+                    aria-label={badgeTitle}
+                    style={{
+                      marginLeft: 2,
+                      minWidth: 16,
+                      height: 16,
+                      padding: "0 4px",
+                      borderRadius: 8,
+                      background: RED,
+                      color: "#fff",
+                      fontSize: 10,
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, marginBottom: 2 }}>saldo</div>
+          <div style={{ fontSize: 17, fontWeight: 700, color: balance >= 0 ? GREEN : RED, fontFamily: "'IBM Plex Mono', monospace" }}>
+            {fmtEUR(balance)}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ position: "relative", marginBottom: 20 }}>
+        <Search size={14} color={INK_SOFT} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
+        <input
+          id="pesquisa"
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+          placeholder="Pesquisar clientes, receitas, despesas, notas…"
+          aria-label="Pesquisar"
+          style={{ width: "100%", padding: "9px 10px 9px 32px", border: `1px solid ${searching ? GOLD : LINE}`, background: CARD, fontSize: 13, color: INK }}
+        />
+      </div>
+
+      {/* Content */}
+      {!loaded ? (
+        <p style={{ color: INK_SOFT, fontSize: 14 }}>A carregar os teus dados…</p>
+      ) : searching ? (
+        <SearchResults
+          query={query}
+          incomes={incomes}
+          expenses={expenses}
+          notes={notes}
+          events={events}
+          clients={clients}
+          onOpen={(t) => { setTab(t); setQuery(""); }}
+        />
+      ) : (
+        <>
+          {tab === "calendario" && <CalendarView events={events} setEvents={setEvents} clients={clients} />}
+          {tab === "faturacao" && <FaturacaoView incomes={incomes} clients={clients} />}
+          {tab === "balanco" && <BalancoView incomes={incomes} setIncomes={setIncomes} expenses={expenses} events={events} clients={clients} settings={settings} setSettings={setSettings} />}
+          {tab === "receitas" && (
+            <LedgerView
+              title="Receitas"
+              items={incomes}
+              setItems={setIncomes}
+              accent={GREEN}
+              placeholder="Ex: Salário, Freelance, Reembolso…"
+              trackPaid
+              clients={clients}
+            />
+          )}
+          {tab === "despesas" && (
+            <LedgerView
+              title="Despesas"
+              items={expenses}
+              setItems={setExpenses}
+              accent={RED}
+              placeholder="Ex: Renda, Supermercado, Assinatura…"
+              trackStatus
+              statusLabels={{ yes: "pago", no: "não pago" }}
+              showClient
+              clients={clients}
+            />
+          )}
+          {tab === "notas" && <NotesView notes={notes} setNotes={setNotes} />}
+          {tab === "clientes" && <ClientesView clients={clients} setClients={setClients} usage={clientUsage} incomes={incomes} />}
+        </>
+      )}
+
+      {saveError && (
+        <p style={{ marginTop: 20, fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>
+          Não foi possível guardar as alterações. Tenta novamente.
+        </p>
+      )}
+
+      {undo && (
+        <div
+          role="status"
+          style={{ position: "fixed", bottom: "calc(16px + env(safe-area-inset-bottom, 0px))", left: "50%", transform: "translateX(-50%)", zIndex: 21, display: "flex", alignItems: "center", gap: 12, padding: "8px 10px 8px 14px", background: HILITE, border: `1px solid ${LINE}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}
+        >
+          {undo.what}
+          <button onClick={applyUndo} style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", background: "none", border: `1px solid ${GOLD}`, color: GOLD, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            <RotateCcw size={12} /> anular
+          </button>
+        </div>
+      )}
+
+      {remoteNotice && !undo && (
+        <div
+          role="status"
+          style={{ position: "fixed", bottom: "calc(16px + env(safe-area-inset-bottom, 0px))", left: "50%", transform: "translateX(-50%)", zIndex: 20, padding: "8px 14px", background: HILITE, border: `1px solid ${GOLD}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}
+        >
+          atualizado com alterações feitas noutro aparelho
+        </div>
+      )}
+
+      <div style={{ marginTop: 40, paddingTop: 16, borderTop: `1px solid ${LINE}`, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>cópia de segurança:</span>
+          <button
+            onClick={exportBackup}
+            disabled={!loaded}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", background: "none", border: `1px solid ${LINE}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <Download size={13} /> exportar
+          </button>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", border: `1px solid ${LINE}`, color: INK, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", cursor: "pointer" }}
+          >
+            <Upload size={13} /> importar
+            <input
+              id="importar-copia"
+              type="file"
+              accept=".json,application/json"
+              onChange={(e) => { readBackup(e.target.files[0]); e.target.value = ""; }}
+              style={{ display: "none" }}
+            />
+          </label>
+        </div>
+        {pendingImport && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "10px 12px", border: `1px solid ${GOLD}`, background: HILITE, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            <span>
+              {pendingImport.name}: {pendingImport.data.incomes.length} receitas, {pendingImport.data.expenses.length} despesas, {pendingImport.data.clients.length} clientes.
+              Substitui todos os dados atuais.
+            </span>
+            <button onClick={applyImport} style={{ padding: "5px 12px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+              repor estes dados
+            </button>
+            <button onClick={() => setPendingImport(null)} style={{ padding: "5px 12px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+              cancelar
+            </button>
+          </div>
+        )}
+        {backupMsg && (
+          <p style={{ margin: 0, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: backupMsg.ok ? GREEN : RED }}>{backupMsg.text}</p>
+        )}
+        <p style={{ margin: 0, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+          os dados deste livro são partilhados — quem tiver este artifact vê e edita o mesmo
+        </p>
+      </div>
+    </div>
+    </UndoContext.Provider>
+  );
+}
+
+export default function App() {
+  return (
+    <div style={{ background: PAPER, minHeight: "100%", fontFamily: "'Manrope', sans-serif", color: INK }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+        * { box-sizing: border-box; }
+        input, select { font-family: 'IBM Plex Mono', monospace; }
+        input::placeholder { color: ${INK_SOFT}; opacity: 0.6; }
+        ::selection { background: ${GOLD}55; }
+        .row-hover:hover { background: ${HILITE}; }
+        button { cursor: pointer; }
+      `}</style>
+
+      <div style={{ maxWidth: 976, margin: "0 auto", padding: "28px 28px 60px" }}>
+        <header style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 24 }}>
+          <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>Innovatweb</h1>
+          <span style={{ fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>o teu controlo empresarial</span>
+        </header>
+        <FinancasApp />
+      </div>
+    </div>
+  );
+}
+
+// Resultados da pesquisa, agrupados; clicar num abre o separador respetivo.
+function SearchResults({ query, incomes, expenses, notes, events, clients, onOpen }) {
+  const q = normalizeText(query.trim());
+  const nameOf = (id) => ((clients || []).find((c) => c.id === id) || {}).name || "";
+  const fmtDate = (d) => d.split("-").reverse().join("/");
+  const hit = (...fields) => fields.some((f) => normalizeText(f).includes(q));
+
+  const groups = [
+    {
+      tab: "receitas",
+      label: "Receitas",
+      rows: incomes
+        .filter((i) => hit(i.desc, nameOf(i.clientId), String(i.amount)))
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((i) => ({ id: i.id, date: fmtDate(i.date), main: nameOf(i.clientId) || i.desc, sub: nameOf(i.clientId) ? i.desc : "", value: fmtEUR(i.amount), color: GREEN, tag: i.received === false ? "pendente" : "" })),
+    },
+    {
+      tab: "despesas",
+      label: "Despesas",
+      rows: expenses
+        .filter((e) => hit(e.desc, nameOf(e.clientId), String(e.amount)))
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((e) => ({ id: e.id, date: fmtDate(e.date), main: nameOf(e.clientId) || e.desc, sub: nameOf(e.clientId) ? e.desc : "", value: fmtEUR(e.amount), color: RED, tag: e.received === false ? "não pago" : "" })),
+    },
+    {
+      tab: "clientes",
+      label: "Clientes",
+      rows: (clients || [])
+        .filter((c) => hit(c.name, c.note, c.email, c.phone))
+        .map((c) => ({ id: c.id, date: "", main: c.name, sub: [c.phone, c.email, c.note].filter(Boolean).join(" · "), value: "", color: INK })),
+    },
+    {
+      tab: "notas",
+      label: "Notas",
+      rows: notes
+        .filter((n) => hit(n.text))
+        .map((n) => ({ id: n.id, date: fmtDate(n.date), main: n.text, sub: n.closed ? "fechada" : "", value: "", color: INK })),
+    },
+    {
+      tab: "calendario",
+      label: "Calendário",
+      rows: events
+        .filter((e) => hit(e.text, nameOf(e.clientId)))
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((e) => ({ id: e.id, date: fmtDate(e.date), main: e.text, sub: nameOf(e.clientId), value: e.hours ? `${e.hours} h` : "", color: GOLD })),
+    },
+  ].filter((g) => g.rows.length > 0);
+
+  if (groups.length === 0) {
+    return <p style={{ color: INK_SOFT, fontSize: 14 }}>Nada encontrado para “{query.trim()}”.</p>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {groups.map((g) => (
+        <section key={g.tab}>
+          <h3 style={{ margin: "0 0 8px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 500, color: INK_SOFT }}>
+            {g.label} · {g.rows.length}
+          </h3>
+          <div style={{ border: `1px solid ${LINE}`, background: CARD }}>
+            {g.rows.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => onOpen(g.tab)}
+                className="row-hover"
+                style={{ display: "flex", width: "100%", gap: 12, alignItems: "baseline", justifyContent: "space-between", padding: "10px 12px", background: "none", border: "none", borderBottom: `1px solid ${LINE}`, color: INK, textAlign: "left", fontFamily: "'Manrope', sans-serif" }}
+              >
+                <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                  <span style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{r.main}</span>
+                  {(r.date || r.sub || r.tag) && (
+                    <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                      {[r.date, r.sub].filter(Boolean).join(" · ")}
+                      {r.tag && <span style={{ color: RED }}>{r.date || r.sub ? " · " : ""}{r.tag}</span>}
+                    </span>
+                  )}
+                </span>
+                {r.value && <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: r.color, whiteSpace: "nowrap" }}>{r.value}</span>}
+              </button>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function StatCell({ label, value, color, icon, border, strong }) {
+  return (
+    <div
+      style={{
+        flex: "1 1 150px",
+        padding: "14px 16px",
+        borderLeft: border ? `1px solid ${LINE}` : "none",
+        background: strong ? HILITE : "transparent",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, color: INK_SOFT, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", textTransform: "lowercase" }}>
+        {icon} {label}
+      </div>
+      <div style={{ fontSize: 19, fontWeight: 700, color, marginTop: 4, fontFamily: "'IBM Plex Mono', monospace" }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+const RECURRENCE_OPTIONS = [
+  { value: "compra_unica", label: "Compra única" },
+  { value: "mensal", label: "Mensal" },
+  { value: "anual", label: "Anual" },
+];
+
+function recurrenceLabel(value) {
+  return RECURRENCE_OPTIONS.find((r) => r.value === value)?.label || "";
+}
+
+// Soma meses a uma data AAAA-MM-DD. Se o dia não existir no mês de destino
+// (31 → fevereiro), fica no último dia desse mês em vez de saltar para o seguinte.
+function addMonths(dateStr, months, anchorDay) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const target = new Date(Date.UTC(y, m - 1 + months, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(anchorDay || d, lastDay));
+  return target.toISOString().slice(0, 10);
+}
+
+// Mensal: mantém sempre uma ocorrência pendente um mês à frente da mais recente
+// já existente na série (mesmo cliente + descrição). Corre ao adicionar (mesmo que
+// a atual ainda não esteja paga) e sempre que se marca uma ocorrência como recebida
+// — nesse caso avança a folga mais um mês.
+function ensureMonthlyBuffer(list, base) {
+  if (base.recurrence !== "mensal") return list;
+  const series = list.filter(
+    (i) => i.desc === base.desc && (i.clientId || null) === (base.clientId || null) && i.recurrence === "mensal"
+  );
+  const maxDate = series.reduce((max, i) => (i.date > max ? i.date : max), base.date);
+  const nextDate = addMonths(maxDate, 1);
+  if (series.some((i) => i.date === nextDate)) return list;
+  return [
+    ...list,
+    { id: uid(), desc: base.desc, amount: base.amount, date: nextDate, received: false, clientId: base.clientId || null, recurrence: base.recurrence },
+  ];
+}
+
+// Anual: quando fica marcada como recebida, gera já pendente a do ano seguinte
+// (mesmo dia e mês; 29/02 passa a 28/02 nos anos não bissextos).
+function maybeSpawnNextAnnual(list, base) {
+  if (base.recurrence !== "anual") return list;
+  const nextDate = addMonths(base.date, 12);
+  const already = list.some(
+    (i) =>
+      i.desc === base.desc &&
+      (i.clientId || null) === (base.clientId || null) &&
+      i.recurrence === base.recurrence &&
+      i.date === nextDate
+  );
+  if (already) return list;
+  return [
+    ...list,
+    { id: uid(), desc: base.desc, amount: base.amount, date: nextDate, received: false, clientId: base.clientId || null, recurrence: base.recurrence },
+  ];
+}
+
+// Marca uma receita como recebida e cria a ocorrência seguinte, se for recorrente.
+function markReceived(list, id) {
+  let next = list.map((i) => (i.id === id ? { ...i, received: true } : i));
+  const marked = next.find((i) => i.id === id);
+  if (!marked) return list;
+  next = ensureMonthlyBuffer(next, marked);
+  return maybeSpawnNextAnnual(next, marked);
+}
+
+function LedgerView({ title, items, setItems, accent, placeholder, trackPaid, trackStatus, statusLabels, clients, showClient }) {
+  const narrow = useIsNarrow();
+  const [csvMsg, setCsvMsg] = useState(null);
+  const [onlyNoReceipt, setOnlyNoReceipt] = useState(false);
+  const [receiptEditId, setReceiptEditId] = useState(null);
+  const [receiptValue, setReceiptValue] = useState("");
+  const activeClients = (clients || []).filter((c) => !isEnded(c));
+  const hasStatus = !!(trackPaid || trackStatus);
+  const hasClient = !!(trackPaid || showClient);
+  const labels = statusLabels || { yes: "recebido", no: "pendente" };
+
+  const [desc, setDesc] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [received, setReceived] = useState(true);
+  const [clientId, setClientId] = useState("");
+  const [recurrence, setRecurrence] = useState("compra_unica");
+  const [filterMonth, setFilterMonth] = useState("geral");
+  const [filterYear, setFilterYear] = useState("geral");
+  const [filterClientId, setFilterClientId] = useState("geral");
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+  const [formError, setFormError] = useState("");
+
+  const availableYears = useMemo(() => {
+    const years = new Set();
+    items.forEach((i) => years.add(i.date.slice(0, 4)));
+    return Array.from(years).sort();
+  }, [items]);
+
+  const filtered = items.filter((i) => {
+    if (onlyNoReceipt && !needsReceipt(i)) return false;
+    if (filterYear !== "geral" && i.date.slice(0, 4) !== filterYear) return false;
+    if (filterMonth !== "geral" && i.date.slice(5, 7) !== filterMonth) return false;
+    if (filterClientId !== "geral") {
+      if (filterClientId === "sem-cliente") {
+        if (i.clientId) return false;
+      } else if (i.clientId !== filterClientId) return false;
+    }
+    return true;
+  });
+
+  const total = hasStatus
+    ? filtered.filter((i) => i.received !== false).reduce((s, i) => s + (Number(i.amount) || 0), 0)
+    : filtered.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const totalPending = hasStatus ? filtered.filter((i) => i.received === false).reduce((s, i) => s + (Number(i.amount) || 0), 0) : 0;
+  const sorted = [...filtered].sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  function clientName(id) {
+    if (!id) return "";
+    const c = (clients || []).find((c) => c.id === id);
+    return c ? c.name : "";
+  }
+
+  function addItem() {
+    const finalDesc = desc.trim() || (hasClient ? "Pagamento" : "");
+    if (!finalDesc) {
+      setFormError("Escreve uma descrição.");
+      return;
+    }
+    if (!amount || isNaN(parseNum(amount))) {
+      setFormError("Escreve um valor válido (ex: 100 ou 100,50).");
+      return;
+    }
+    setFormError("");
+    const newItem = {
+      id: uid(),
+      desc: finalDesc,
+      amount: parseNum(amount),
+      date,
+      received: hasStatus ? received : true,
+      clientId: hasClient ? (clientId || null) : null,
+      recurrence: hasStatus ? recurrence : "compra_unica",
+    };
+    let next = [...items, newItem];
+    if (hasStatus) {
+      next = ensureMonthlyBuffer(next, newItem);
+      if (newItem.received !== false) next = maybeSpawnNextAnnual(next, newItem);
+    }
+    setItems(next);
+    setDesc("");
+    setAmount("");
+    setReceived(true);
+    setClientId("");
+    setRecurrence("compra_unica");
+  }
+
+  function removeItem(id) {
+    setItems(items.filter((i) => i.id !== id));
+  }
+
+  function toggleReceived(id) {
+    let next = items.map((i) => (i.id === id ? { ...i, received: !i.received } : i));
+    const toggled = next.find((i) => i.id === id);
+    if (hasStatus && toggled && toggled.received !== false) {
+      next = ensureMonthlyBuffer(next, toggled);
+      next = maybeSpawnNextAnnual(next, toggled);
+    }
+    setItems(next);
+  }
+
+  function startEdit(item) {
+    setEditingId(item.id);
+    setEditForm({
+      desc: item.desc,
+      amount: String(item.amount),
+      date: item.date,
+      received: item.received !== false,
+      clientId: item.clientId || "",
+      recurrence: item.recurrence || "compra_unica",
+      receipt: item.receipt || "",
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditForm(null);
+  }
+
+  function saveEdit(id) {
+    const finalDesc = editForm.desc.trim() || (hasClient ? "Pagamento" : "");
+    if (!finalDesc || !editForm.amount || isNaN(parseNum(editForm.amount))) return;
+    let next = items.map((i) =>
+      i.id === id
+        ? {
+            ...i,
+            desc: finalDesc,
+            amount: parseNum(editForm.amount),
+            date: editForm.date,
+            received: hasStatus ? editForm.received : true,
+            clientId: hasClient ? (editForm.clientId || null) : null,
+            recurrence: hasStatus ? editForm.recurrence : "compra_unica",
+            ...(trackPaid ? { receipt: editForm.receipt.trim() } : {}),
+          }
+        : i
+    );
+    const edited = next.find((i) => i.id === id);
+    if (hasStatus) {
+      next = ensureMonthlyBuffer(next, edited);
+      if (edited && edited.received !== false) next = maybeSpawnNextAnnual(next, edited);
+    }
+    setItems(next);
+    setEditingId(null);
+    setEditForm(null);
+  }
+
+  // CSV para o contabilista: o que está filtrado, do mais antigo para o mais recente.
+  // ";" e vírgula decimal, como o Excel em português espera.
+  async function exportCsv() {
+    const esc = (v) => {
+      const t = String(v ?? "");
+      return /[";\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+    const header = ["data", ...(hasClient ? ["cliente"] : []), hasClient ? "pagamento" : "descrição", "valor", ...(hasStatus ? ["estado", "recorrência"] : []), ...(trackPaid ? ["recibo"] : [])];
+    const rows = [...filtered]
+      .sort((a, b) => (a.date < b.date ? -1 : 1))
+      .map((i) => [
+        i.date.split("-").reverse().join("/"),
+        ...(hasClient ? [clientName(i.clientId)] : []),
+        i.desc,
+        (Number(i.amount) || 0).toFixed(2).replace(".", ","),
+        ...(hasStatus ? [i.received === false ? labels.no : labels.yes, recurrenceLabel(i.recurrence || "compra_unica")] : []),
+        ...(trackPaid ? [i.receipt === "passado" ? "sim" : i.receipt || ""] : []),
+      ]);
+    const csv = "\ufeff" + [header, ...rows].map((r) => r.map(esc).join(";")).join("\r\n");
+    const period =
+      filterYear !== "geral" ? (filterMonth !== "geral" ? `${filterYear}-${filterMonth}` : filterYear) : filterMonth !== "geral" ? `mes-${filterMonth}` : "tudo";
+    setCsvMsg(await saveFile(`innovatweb-${normalizeText(title)}-${period}.csv`, csv, "text/csv"));
+  }
+
+  const noReceiptCount = trackPaid ? items.filter(needsReceipt).length : 0;
+
+  function saveReceipt(id) {
+    setItems(items.map((i) => (i.id === id ? { ...i, receipt: receiptValue.trim() || "passado" } : i)));
+    setReceiptEditId(null);
+    setReceiptValue("");
+  }
+
+  // recibo verde de uma receita recebida com cliente: "sem recibo" → nº
+  function renderReceipt(item) {
+    if (!trackPaid || item.received === false || !item.clientId) return null;
+    const mono = { fontSize: 10, fontFamily: "'IBM Plex Mono', monospace" };
+    if (receiptEditId === item.id) {
+      return (
+        <span style={{ display: "inline-flex", gap: 4, alignItems: "center", marginTop: 4 }}>
+          <input
+            id={`recibo-${item.id}`}
+            autoFocus
+            value={receiptValue}
+            onChange={(e) => setReceiptValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveReceipt(item.id);
+              if (e.key === "Escape") setReceiptEditId(null);
+            }}
+            placeholder="nº recibo (opcional)"
+            aria-label="número do recibo"
+            style={{ ...mono, fontSize: 11, width: 130, padding: "3px 6px", border: `1px solid ${GOLD}`, background: PAPER, color: INK }}
+          />
+          <button onClick={() => saveReceipt(item.id)} style={{ ...mono, padding: "3px 8px", background: INK, color: PAPER, border: "none" }}>
+            ok
+          </button>
+        </span>
+      );
+    }
+    const start = () => {
+      setReceiptEditId(item.id);
+      setReceiptValue(item.receipt && item.receipt !== "passado" ? item.receipt : "");
+    };
+    return item.receipt ? (
+      <button onClick={start} title="editar recibo" style={{ ...mono, display: "inline-flex", alignItems: "center", gap: 3, marginTop: 3, padding: 0, background: "none", border: "none", color: GREEN }}>
+        <FileText size={10} /> {item.receipt === "passado" ? "recibo passado" : `recibo ${item.receipt}`}
+      </button>
+    ) : (
+      <button onClick={start} style={{ ...mono, display: "inline-flex", alignItems: "center", gap: 3, marginTop: 3, padding: "1px 6px", background: "none", border: `1px dashed ${GOLD}`, color: GOLD }}>
+        <FileText size={10} /> sem recibo
+      </button>
+    );
+  }
+
+  function renderStatus(item) {
+    return (
+      <button
+        onClick={() => toggleReceived(item.id)}
+        style={{
+          padding: "3px 8px",
+          background: "none",
+          border: `1px solid ${item.received === false ? RED : GREEN}`,
+          color: item.received === false ? RED : GREEN,
+          fontSize: 10,
+          fontFamily: "'IBM Plex Mono', monospace",
+          borderRadius: 2,
+        }}
+      >
+        {item.received === false ? labels.no : labels.yes}
+      </button>
+    );
+  }
+
+  const gridCols = hasClient
+    ? "88px 110px 1fr 85px 90px 100px 54px"
+    : hasStatus
+    ? "100px 1fr 90px 90px 100px 54px"
+    : "110px 1fr 100px 54px";
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        {hasClient && (
+          <select
+            value={clientId}
+            onChange={(e) => setClientId(e.target.value)}
+            style={{ flex: "1 1 140px", padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
+          >
+            <option value="">sem cliente</option>
+            {activeClients.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        )}
+        <input
+          value={desc}
+          onChange={(e) => { setDesc(e.target.value); if (formError) setFormError(""); }}
+          placeholder={hasClient ? "Pagamento (ex: mensalidade, sinal…)" : placeholder}
+          onKeyDown={(e) => e.key === "Enter" && addItem()}
+          style={{
+            flex: "1 1 200px",
+            padding: "9px 10px",
+            border: `1px solid ${LINE}`,
+            background: CARD,
+            fontSize: 13,
+            color: INK,
+          }}
+        />
+        <input
+          value={amount}
+          onChange={(e) => { setAmount(e.target.value); if (formError) setFormError(""); }}
+          placeholder="0.00"
+          type="text"
+          inputMode="decimal"
+          onKeyDown={(e) => e.key === "Enter" && addItem()}
+          style={{ width: 100, padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
+        />
+        <input
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          type="date"
+          style={{ width: 150, padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
+        />
+        {hasStatus && (
+          <select
+            value={recurrence}
+            onChange={(e) => setRecurrence(e.target.value)}
+            style={{ width: 130, padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
+          >
+            {RECURRENCE_OPTIONS.map((r) => (
+              <option key={r.value} value={r.value}>{r.label}</option>
+            ))}
+          </select>
+        )}
+        {hasStatus && (
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace", padding: "0 4px" }}>
+            <input type="checkbox" checked={received} onChange={(e) => setReceived(e.target.checked)} />
+            já {labels.yes}
+          </label>
+        )}
+        <button
+          onClick={addItem}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "9px 14px",
+            background: INK,
+            color: PAPER,
+            border: "none",
+            fontSize: 13,
+            fontFamily: "'IBM Plex Mono', monospace",
+          }}
+        >
+          <Plus size={14} /> adicionar
+        </button>
+      </div>
+
+      {formError && (
+        <p style={{ margin: "-6px 0 12px", fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>
+          {formError}
+        </p>
+      )}
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>filtrar:</span>
+        <select
+          value={filterMonth}
+          onChange={(e) => setFilterMonth(e.target.value)}
+          style={{ padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK }}
+        >
+          <option value="geral">Todos os meses</option>
+          {MONTHS_ABBR.map((m, idx) => (
+            <option key={m} value={String(idx + 1).padStart(2, "0")}>{m}</option>
+          ))}
+        </select>
+        <select
+          value={filterYear}
+          onChange={(e) => setFilterYear(e.target.value)}
+          style={{ padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK }}
+        >
+          <option value="geral">Todos os anos</option>
+          {availableYears.map((y) => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </select>
+        {hasClient && (
+          <select
+            value={filterClientId}
+            onChange={(e) => setFilterClientId(e.target.value)}
+            style={{ padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK }}
+          >
+            <option value="geral">Todos os clientes</option>
+            <option value="sem-cliente">Sem cliente</option>
+            {(clients || []).map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        )}
+        {(filterMonth !== "geral" || filterYear !== "geral" || filterClientId !== "geral") && (
+          <button
+            onClick={() => { setFilterMonth("geral"); setFilterYear("geral"); setFilterClientId("geral"); }}
+            style={{ padding: "6px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            Geral
+          </button>
+        )}
+        {trackPaid && (noReceiptCount > 0 || onlyNoReceipt) && (
+          <button
+            onClick={() => setOnlyNoReceipt(!onlyNoReceipt)}
+            aria-pressed={onlyNoReceipt}
+            style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px", border: `1px solid ${onlyNoReceipt ? GOLD : LINE}`, background: onlyNoReceipt ? HILITE : CARD, fontSize: 12, color: GOLD, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <FileText size={12} /> sem recibo ({noReceiptCount})
+          </button>
+        )}
+        <button
+          onClick={exportCsv}
+          disabled={filtered.length === 0}
+          title="Exportar o que está filtrado para Excel (CSV)"
+          style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 12, color: INK, fontFamily: "'IBM Plex Mono', monospace" }}
+        >
+          <Download size={12} /> CSV
+        </button>
+        {hasStatus && totalPending > 0 && (
+          <span style={{ marginLeft: "auto", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: RED }}>
+            {labels.no}: {fmtEUR(totalPending)}
+          </span>
+        )}
+      </div>
+      {csvMsg && (
+        <p style={{ margin: "-8px 0 14px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: csvMsg.ok ? GREEN : RED }}>{csvMsg.text}</p>
+      )}
+
+      {sorted.length === 0 ? (
+        <p style={{ color: INK_SOFT, fontSize: 14, padding: "20px 0", borderTop: `1px solid ${LINE}` }}>
+          Sem {title.toLowerCase()} para este período.
+        </p>
+      ) : (
+        // no telemóvel a tabela desliza dentro da caixa, sem arrastar a página
+        <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, background: CARD }}>
+        <div style={{ minWidth: narrow ? 0 : hasClient ? 660 : 560 }}>
+          {!narrow && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: gridCols,
+              padding: "8px 12px",
+              fontSize: 11,
+              fontFamily: "'IBM Plex Mono', monospace",
+              color: INK_SOFT,
+              borderBottom: `1px solid ${LINE}`,
+            }}
+          >
+            <span>data</span>
+            {hasClient && <span>cliente</span>}
+            <span>{hasClient ? "pagamento" : "descrição"}</span>
+            <span style={{ textAlign: "right" }}>valor</span>
+            {hasStatus && <span style={{ textAlign: "center" }}>estado</span>}
+            {hasStatus && <span style={{ textAlign: "center" }}>recorrência</span>}
+            <span />
+          </div>
+          )}
+          {sorted.map((item) =>
+            editingId === item.id ? (
+              <div key={item.id} style={{ padding: "12px", borderBottom: `1px solid ${LINE}`, background: HILITE }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  {hasClient && (
+                    <select
+                      value={editForm.clientId}
+                      onChange={(e) => setEditForm({ ...editForm, clientId: e.target.value })}
+                      style={{ flex: "1 1 130px", padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                    >
+                      <option value="">sem cliente</option>
+                      {(clients || []).filter((c) => !isEnded(c) || c.id === editForm.clientId).map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  )}
+                  <input
+                    value={editForm.desc}
+                    onChange={(e) => setEditForm({ ...editForm, desc: e.target.value })}
+                    style={{ flex: "1 1 160px", padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                  />
+                  <input
+                    value={editForm.amount}
+                    onChange={(e) => setEditForm({ ...editForm, amount: e.target.value })}
+                    type="text"
+                    inputMode="decimal"
+                    style={{ width: 100, padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                  />
+                  <input
+                    value={editForm.date}
+                    onChange={(e) => setEditForm({ ...editForm, date: e.target.value })}
+                    type="date"
+                    style={{ width: 150, padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                  />
+                  {hasStatus && (
+                    <select
+                      value={editForm.recurrence}
+                      onChange={(e) => setEditForm({ ...editForm, recurrence: e.target.value })}
+                      style={{ width: 130, padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                    >
+                      {RECURRENCE_OPTIONS.map((r) => (
+                        <option key={r.value} value={r.value}>{r.label}</option>
+                      ))}
+                    </select>
+                  )}
+                  {trackPaid && (
+                    <input
+                      value={editForm.receipt}
+                      onChange={(e) => setEditForm({ ...editForm, receipt: e.target.value })}
+                      placeholder="nº recibo"
+                      aria-label="número do recibo"
+                      style={{ width: 120, padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                    />
+                  )}
+                  {hasStatus && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      <input
+                        type="checkbox"
+                        checked={editForm.received}
+                        onChange={(e) => setEditForm({ ...editForm, received: e.target.checked })}
+                      />
+                      {labels.yes}
+                    </label>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => saveEdit(item.id)} style={{ padding: "6px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                    guardar
+                  </button>
+                  <button onClick={cancelEdit} style={{ padding: "6px 14px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                    cancelar
+                  </button>
+                </div>
+              </div>
+            ) : narrow ? (
+              <div key={item.id} className="row-hover" style={{ padding: "12px", borderBottom: `1px solid ${LINE}`, display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{(hasClient && clientName(item.clientId)) || item.desc}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: accent, fontWeight: 700, fontSize: 15, whiteSpace: "nowrap" }}>
+                    {fmtEUR(item.amount)}
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                    {item.date.split("-").reverse().join("/")}
+                    {hasClient && clientName(item.clientId) ? ` · ${item.desc}` : ""}
+                    {item.recurrence && item.recurrence !== "compra_unica" ? ` · ${recurrenceLabel(item.recurrence).toLowerCase()}` : ""}
+                    {renderReceipt(item) && <><br />{renderReceipt(item)}</>}
+                  </span>
+                  <span style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                    {hasStatus && renderStatus(item)}
+                    <button onClick={() => startEdit(item)} style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }} aria-label="editar">
+                      <Pencil size={14} />
+                    </button>
+                    <DeleteButton onConfirm={() => removeItem(item.id)} what={trackPaid ? "receita apagada" : "despesa apagada"} />
+                  </span>
+                </div>
+              </div>
+            ) : (
+            <div
+              key={item.id}
+              className="row-hover"
+              style={{
+                display: "grid",
+                gridTemplateColumns: gridCols,
+                padding: "10px 12px",
+                fontSize: 13,
+                alignItems: "center",
+                borderBottom: `1px solid ${LINE}`,
+              }}
+            >
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, fontSize: 12 }}>
+                {item.date.slice(8, 10)}/{item.date.slice(5, 7)}/{item.date.slice(0, 4)}
+              </span>
+              {hasClient && (
+                <span style={{ fontSize: 12, color: item.clientId ? INK : INK_SOFT }}>
+                  {clientName(item.clientId) || "—"}
+                </span>
+              )}
+              <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                {item.desc}
+                {renderReceipt(item)}
+              </span>
+              <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: accent, fontWeight: 600 }}>
+                {fmtEUR(item.amount)}
+              </span>
+              {hasStatus && <span style={{ textAlign: "center" }}>{renderStatus(item)}</span>}
+              {hasStatus && (
+                <span
+                  style={{
+                    textAlign: "center",
+                    fontSize: 11,
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    color: item.recurrence && item.recurrence !== "compra_unica" ? INK : INK_SOFT,
+                  }}
+                >
+                  {item.recurrence && item.recurrence !== "compra_unica" ? recurrenceLabel(item.recurrence) : "—"}
+                </span>
+              )}
+              <span style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+                <button
+                  onClick={() => startEdit(item)}
+                  style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }}
+                  aria-label="editar"
+                >
+                  <Pencil size={14} />
+                </button>
+                <DeleteButton onConfirm={() => removeItem(item.id)} what={trackPaid ? "receita apagada" : "despesa apagada"} />
+              </span>
+            </div>
+            )
+          )}
+          {narrow ? (
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", fontSize: 13, fontWeight: 700, background: HILITE }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, alignSelf: "center" }}>{hasStatus ? `total ${labels.yes}` : "total"}</span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: accent }}>{fmtEUR(total)}</span>
+            </div>
+          ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: gridCols,
+              padding: "10px 12px",
+              fontSize: 13,
+              fontWeight: 700,
+              background: HILITE,
+            }}
+          >
+            <span />
+            {hasClient && <span />}
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT, alignSelf: "center" }}>{hasStatus ? `total ${labels.yes}` : "total"}</span>
+            <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: accent }}>{fmtEUR(total)}</span>
+            {hasStatus && <span />}
+            {hasStatus && <span />}
+            <span />
+          </div>
+          )}
+        </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SERVICE_OPTIONS = [
+  { value: "redes_sociais", label: "Gerir redes sociais" },
+  { value: "site", label: "Site" },
+  { value: "automacao", label: "Automação" },
+  { value: "redes_sociais_site", label: "Gerir redes sociais e site" },
+];
+const STATUS_OPTIONS = [
+  { value: "mensal", label: "Mensal" },
+  { value: "anual", label: "Anual" },
+  { value: "compra_unica", label: "Compra única" },
+];
+
+function serviceLabel(value) {
+  return SERVICE_OPTIONS.find((s) => s.value === value)?.label || value;
+}
+function statusLabel(value) {
+  return STATUS_OPTIONS.find((s) => s.value === value)?.label || value;
+}
+
+const inputStyle = {
+  padding: "9px 10px",
+  border: `1px solid ${LINE}`,
+  background: PAPER,
+  fontSize: 13,
+  color: INK,
+  width: "100%",
+};
+const editInputStyle = { ...inputStyle, border: `1px solid ${GOLD}`, background: HILITE };
+
+function emptyClientForm() {
+  return {
+    name: "",
+    note: "",
+    phone: "",
+    email: "",
+    status: "mensal",
+    contractValue: "",
+    serviceType: "",
+    contractStart: "",
+    contractEnd: "",
+  };
+}
+
+function ClientForm({ value, onChange, idPrefix }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      <div>
+        <label style={fieldLabelStyle}>Nome do cliente</label>
+        <input
+          value={value.name}
+          onChange={(e) => onChange({ ...value, name: e.target.value })}
+          placeholder="Nome do cliente"
+          style={inputStyle}
+        />
+      </div>
+      <div>
+        <label style={fieldLabelStyle}>Nota</label>
+        <input
+          value={value.note}
+          onChange={(e) => onChange({ ...value, note: e.target.value })}
+          placeholder="Nota (opcional)"
+          style={inputStyle}
+        />
+      </div>
+      <div>
+        <label style={fieldLabelStyle}>Telemóvel</label>
+        <input
+          value={value.phone}
+          onChange={(e) => onChange({ ...value, phone: e.target.value.replace(/[^0-9]/g, "") })}
+          placeholder="912345678"
+          inputMode="numeric"
+          type="tel"
+          style={inputStyle}
+        />
+      </div>
+      <div>
+        <label style={fieldLabelStyle}>Email</label>
+        <input
+          value={value.email}
+          onChange={(e) => onChange({ ...value, email: e.target.value })}
+          placeholder="cliente@email.com"
+          type="email"
+          style={inputStyle}
+        />
+      </div>
+      <div>
+        <label style={fieldLabelStyle}>Estado</label>
+        <select value={value.status} onChange={(e) => onChange({ ...value, status: e.target.value })} style={inputStyle}>
+          {STATUS_OPTIONS.map((s) => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label style={fieldLabelStyle}>Valor do contrato</label>
+        <input
+          value={value.contractValue}
+          onChange={(e) => onChange({ ...value, contractValue: e.target.value })}
+          placeholder="0.00"
+          type="text"
+          inputMode="decimal"
+          style={inputStyle}
+        />
+      </div>
+      <div>
+        <label style={fieldLabelStyle}>Início do contrato</label>
+        <input
+          value={value.contractStart}
+          onChange={(e) => onChange({ ...value, contractStart: e.target.value })}
+          type="date"
+          style={inputStyle}
+        />
+      </div>
+      <div>
+        <label style={fieldLabelStyle}>Fim do contrato</label>
+        <input
+          value={value.contractEnd}
+          onChange={(e) => onChange({ ...value, contractEnd: e.target.value })}
+          type="date"
+          style={inputStyle}
+        />
+      </div>
+      <div style={{ gridColumn: "1 / -1" }}>
+        <label style={fieldLabelStyle}>Tipo de serviço</label>
+        <select
+          value={value.serviceType}
+          onChange={(e) => onChange({ ...value, serviceType: e.target.value })}
+          style={{ ...inputStyle, borderColor: value.serviceType ? LINE : GOLD, color: value.serviceType ? INK : GOLD }}
+        >
+          <option value="" disabled>— escolhe o tipo de serviço —</option>
+          {SERVICE_OPTIONS.map((s) => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
+const fieldLabelStyle = {
+  display: "block",
+  fontSize: 10,
+  fontFamily: "'IBM Plex Mono', monospace",
+  color: INK_SOFT,
+  marginBottom: 3,
+  textTransform: "lowercase",
+};
+
+function ClientesView({ clients, setClients, usage, incomes }) {
+  const [form, setForm] = useState(emptyClientForm());
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(emptyClientForm());
+  const [formError, setFormError] = useState("");
+  const [editError, setEditError] = useState("");
+  const [showEnded, setShowEnded] = useState(false);
+
+  const byName = (a, b) => a.name.localeCompare(b.name, "pt");
+  const active = clients.filter((c) => !isEnded(c)).sort(byName);
+  const ended = clients.filter(isEnded).sort(byName);
+  const sorted = showEnded ? [...active, ...ended] : active;
+  const mrr = active.reduce((s, c) => s + monthlyValue(c.id, incomes), 0);
+
+  function setEnded(id, value) {
+    setClients(clients.map((c) => (c.id === id ? { ...c, ended: value } : c)));
+  }
+
+  function addClient() {
+    if (!form.name.trim()) {
+      setFormError("Escreve o nome do cliente.");
+      return;
+    }
+    if (!form.serviceType) {
+      setFormError("Escolhe o tipo de serviço — é o que conta para os objetivos.");
+      return;
+    }
+    setFormError("");
+    setClients([
+      ...clients,
+      {
+        id: uid(),
+        name: form.name.trim(),
+        note: form.note.trim(),
+        phone: form.phone.trim(),
+        email: form.email.trim(),
+        status: form.status,
+        contractValue: form.contractValue ? parseNum(form.contractValue) : 0,
+        serviceType: form.serviceType,
+        contractStart: form.contractStart,
+        contractEnd: form.contractEnd,
+      },
+    ]);
+    setForm(emptyClientForm());
+  }
+
+  function removeClient(id) {
+    setClients(clients.filter((c) => c.id !== id));
+  }
+
+  function startEdit(c) {
+    setEditingId(c.id);
+    setEditForm({
+      name: c.name || "",
+      note: c.note || "",
+      phone: c.phone || "",
+      email: c.email || "",
+      status: c.status || "mensal",
+      contractValue: c.contractValue ?? "",
+      serviceType: c.serviceType || "",
+      contractStart: c.contractStart || "",
+      contractEnd: c.contractEnd || "",
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditError("");
+  }
+
+  function saveEdit(id) {
+    if (!editForm.name.trim()) return;
+    if (!editForm.serviceType) {
+      setEditError("Escolhe o tipo de serviço antes de guardar.");
+      return;
+    }
+    setEditError("");
+    setClients(
+      clients.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              name: editForm.name.trim(),
+              note: editForm.note.trim(),
+              phone: editForm.phone.trim(),
+              email: editForm.email.trim(),
+              status: editForm.status,
+              contractValue: editForm.contractValue ? parseNum(editForm.contractValue) : 0,
+              serviceType: editForm.serviceType,
+              contractStart: editForm.contractStart,
+              contractEnd: editForm.contractEnd,
+            }
+          : c
+      )
+    );
+    setEditingId(null);
+  }
+
+  return (
+    <div>
+      <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 16, marginBottom: 18 }}>
+        <ClientForm value={form} onChange={setForm} />
+        <button
+          onClick={addClient}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: INK, color: PAPER, border: "none", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", marginTop: 10 }}
+        >
+          <Plus size={14} /> adicionar cliente
+        </button>
+        {formError && <p style={{ margin: "8px 0 0", fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{formError}</p>}
+      </div>
+
+      {clients.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", alignItems: "baseline", marginBottom: 12, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+          <span>
+            <span style={{ color: INK, fontWeight: 600 }}>{active.length}</span> cliente{active.length === 1 ? "" : "s"} ativo{active.length === 1 ? "" : "s"}
+          </span>
+          <span>
+            receita mensal garantida: <span style={{ color: GREEN, fontWeight: 600 }}>{fmtEUR(mrr)}</span>/mês
+          </span>
+          {ended.length > 0 && (
+            <button
+              onClick={() => setShowEnded(!showEnded)}
+              aria-pressed={showEnded}
+              style={{ marginLeft: "auto", padding: "4px 10px", background: "none", border: `1px solid ${LINE}`, color: INK_SOFT, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+            >
+              {showEnded ? "esconder terminados" : `ver terminados (${ended.length})`}
+            </button>
+          )}
+        </div>
+      )}
+
+      {sorted.length === 0 ? (
+        <p style={{ color: INK_SOFT, fontSize: 14 }}>{clients.length ? "Não tens clientes ativos." : "Ainda não tens clientes registados."}</p>
+      ) : (
+        <div style={{ border: `1px solid ${LINE}`, background: CARD }}>
+          {sorted.map((c) => (
+            <div key={c.id} className="row-hover" style={{ padding: "12px 14px", borderBottom: `1px solid ${LINE}` }}>
+              {editingId === c.id ? (
+                <div>
+                  <ClientForm value={editForm} onChange={setEditForm} />
+                  {editError && <p style={{ margin: "8px 0 0", fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{editError}</p>}
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button onClick={() => saveEdit(c.id)} style={{ padding: "6px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      guardar
+                    </button>
+                    <button onClick={cancelEdit} style={{ padding: "6px 14px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      cancelar
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, opacity: isEnded(c) ? 0.6 : 1 }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14, fontWeight: 600 }}>{c.name}</span>
+                      {isEnded(c) && (
+                        <span style={{ fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, border: `1px solid ${LINE}`, padding: "1px 6px", borderRadius: 2 }}>terminado</span>
+                      )}
+                      {!isEnded(c) && monthlyValue(c.id, incomes) > 0 && (
+                        <span style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: GREEN }}>{fmtEUR(monthlyValue(c.id, incomes))}/mês</span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 4 }}>
+                      {c.phone && (
+                        <span style={{ fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace", display: "flex", alignItems: "center", gap: 5 }}>
+                          <Phone size={11} /> {c.phone}
+                        </span>
+                      )}
+                      {c.email && (
+                        <span style={{ fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace", display: "flex", alignItems: "center", gap: 5 }}>
+                          <Mail size={11} /> {c.email}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                      {c.status && (
+                        <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: GOLD, border: `1px solid ${GOLD}`, padding: "2px 7px", borderRadius: 2 }}>
+                          {statusLabel(c.status)}
+                        </span>
+                      )}
+                      {c.serviceType ? (
+                        <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, border: `1px solid ${LINE}`, padding: "2px 7px", borderRadius: 2 }}>
+                          {serviceLabel(c.serviceType)}
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => startEdit(c)}
+                          style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: GOLD, background: "none", border: `1px dashed ${GOLD}`, padding: "2px 7px", borderRadius: 2 }}
+                        >
+                          sem tipo de serviço — escolher
+                        </button>
+                      )}
+                      {!!c.contractValue && (
+                        <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: GREEN, border: `1px solid ${LINE}`, padding: "2px 7px", borderRadius: 2 }}>
+                          {fmtEUR(c.contractValue)}
+                        </span>
+                      )}
+                      {(c.contractStart || c.contractEnd) && (
+                        <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, border: `1px solid ${LINE}`, padding: "2px 7px", borderRadius: 2 }}>
+                          {c.contractStart ? c.contractStart.split("-").reverse().join("/") : "?"} → {c.contractEnd ? c.contractEnd.split("-").reverse().join("/") : "?"}
+                        </span>
+                      )}
+                    </div>
+                    {c.note && <div style={{ fontSize: 12, color: INK_SOFT, marginTop: 6 }}>{c.note}</div>}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
+                    <button
+                      onClick={() => setEnded(c.id, !isEnded(c))}
+                      style={{ padding: "2px 8px", background: "none", border: `1px solid ${LINE}`, color: INK_SOFT, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}
+                    >
+                      {isEnded(c) ? "reativar" : "terminar"}
+                    </button>
+                    <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="editar">
+                      <Pencil size={14} />
+                    </button>
+                    <DeleteButton
+                      what="cliente apagado"
+                      onConfirm={() => removeClient(c.id)}
+                      question={usage[c.id] ? `tem ${usage[c.id]} registo${usage[c.id] === 1 ? "" : "s"} ligado${usage[c.id] === 1 ? "" : "s"}, que fica${usage[c.id] === 1 ? "" : "m"} sem cliente. apagar?` : "apagar cliente?"}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NotesView({ notes, setNotes }) {
+  const [text, setText] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
+  const sorted = [...notes].sort((a, b) => {
+    if (!!a.closed !== !!b.closed) return a.closed ? 1 : -1;
+    return a.date < b.date ? 1 : -1;
+  });
+
+  function addNote() {
+    if (!text.trim()) return;
+    setNotes([...notes, { id: uid(), text: text.trim(), date: todayISO(), closed: false }]);
+    setText("");
+  }
+
+  function removeNote(id) {
+    setNotes(notes.filter((n) => n.id !== id));
+  }
+
+  function toggleClosed(id) {
+    setNotes(notes.map((n) => (n.id === id ? { ...n, closed: !n.closed } : n)));
+  }
+
+  function startEdit(note) {
+    setEditingId(note.id);
+    setEditText(note.text);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditText("");
+  }
+
+  function saveEdit(id) {
+    if (!editText.trim()) return;
+    setNotes(notes.map((n) => (n.id === id ? { ...n, text: editText.trim() } : n)));
+    setEditingId(null);
+    setEditText("");
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) addNote();
+          }}
+          placeholder="Escreve uma nota, lembrete ou ideia…"
+          rows={2}
+          style={{
+            flex: 1,
+            padding: "10px 12px",
+            border: `1px solid ${LINE}`,
+            background: CARD,
+            fontSize: 13,
+            color: INK,
+            fontFamily: "'Manrope', sans-serif",
+            resize: "vertical",
+          }}
+        />
+        <button
+          onClick={addNote}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "0 16px",
+            background: INK,
+            color: PAPER,
+            border: "none",
+            fontSize: 13,
+            fontFamily: "'IBM Plex Mono', monospace",
+          }}
+        >
+          <Plus size={14} /> adicionar
+        </button>
+      </div>
+
+      {sorted.length === 0 ? (
+        <p style={{ color: INK_SOFT, fontSize: 14 }}>Ainda não escreveste nenhuma nota.</p>
+      ) : (
+        <div style={{ border: `1px solid ${LINE}`, background: CARD }}>
+          {sorted.map((n) => (
+            <div
+              key={n.id}
+              className="row-hover"
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                gap: 10,
+                padding: "12px 14px",
+                borderBottom: `1px solid ${LINE}`,
+                fontSize: 13,
+                opacity: n.closed ? 0.55 : 1,
+              }}
+            >
+              <div style={{ flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: INK_SOFT }}>
+                    {n.date.slice(8, 10)}/{n.date.slice(5, 7)}/{n.date.slice(0, 4)}
+                  </span>
+                  {n.closed && (
+                    <span style={{ fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: GREEN, border: `1px solid ${GREEN}`, padding: "1px 6px", borderRadius: 2 }}>
+                      fechada
+                    </span>
+                  )}
+                </div>
+                {editingId === n.id ? (
+                  <div>
+                    <textarea
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveEdit(n.id);
+                        if (e.key === "Escape") cancelEdit();
+                      }}
+                      rows={2}
+                      autoFocus
+                      style={{
+                        width: "100%",
+                        padding: "8px 10px",
+                        border: `1px solid ${GOLD}`,
+                        background: HILITE,
+                        fontSize: 13,
+                        color: INK,
+                        fontFamily: "'Manrope', sans-serif",
+                        resize: "vertical",
+                        marginBottom: 6,
+                      }}
+                    />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        onClick={() => saveEdit(n.id)}
+                        style={{ padding: "5px 12px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+                      >
+                        guardar
+                      </button>
+                      <button
+                        onClick={cancelEdit}
+                        style={{ padding: "5px 12px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+                      >
+                        cancelar
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ whiteSpace: "pre-wrap" }}>{n.text}</div>
+                )}
+              </div>
+              {editingId !== n.id && (
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button
+                    onClick={() => toggleClosed(n.id)}
+                    style={{
+                      padding: "3px 9px",
+                      background: "none",
+                      color: n.closed ? INK_SOFT : GREEN,
+                      border: `1px solid ${n.closed ? LINE : GREEN}`,
+                      fontSize: 11,
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      borderRadius: 2,
+                    }}
+                  >
+                    {n.closed ? "reabrir" : "fechar"}
+                  </button>
+                  <button onClick={() => startEdit(n)} style={{ background: "none", border: "none", color: INK_SOFT }} aria-label="editar">
+                    <Pencil size={14} />
+                  </button>
+                  <DeleteButton onConfirm={() => removeNote(n.id)} what="nota apagada" />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// dias de `from` até `to` (datas AAAA-MM-DD); positivo se `from` já passou
+function daysBetween(from, to) {
+  const a = Date.UTC(...from.split("-").map((n, i) => Number(n) - (i === 1 ? 1 : 0)));
+  const b = Date.UTC(...to.split("-").map((n, i) => Number(n) - (i === 1 ? 1 : 0)));
+  return Math.round((b - a) / 86400000);
+}
+
+function monthKey(dateStr) {
+  return dateStr.slice(0, 7); // YYYY-MM
+}
+
+function monthLabel(key) {
+  const [y, m] = key.split("-");
+  return `${MONTHS_ABBR[Number(m) - 1]} ${y.slice(2)}`;
+}
+
+const PIE_COLORS = ["#E2604A", "#D8A73A", "#3FB87F", "#5B8DEF", "#B07CC6", "#4FBDC0"];
+function BalancoView({ incomes, setIncomes, expenses, events, clients, settings, setSettings }) {
+  const HOURLY_RATE = Number(settings.hourlyRate) || 0;
+  const MARGIN_START = settings.marginStart;
+  const [marginYear, marginMonth] = MARGIN_START.split("-").map(Number);
+  const [editingSettings, setEditingSettings] = useState(false);
+  const [settingsForm, setSettingsForm] = useState(null);
+  const [settingsError, setSettingsError] = useState("");
+
+  function startEditSettings() {
+    setSettingsForm({
+      hourlyRate: String(settings.hourlyRate).replace(".", ","),
+      marginStart: MARGIN_START.slice(0, 7),
+      taxReserve: String(settings.taxReserve).replace(".", ","),
+    });
+    setSettingsError("");
+    setEditingSettings(true);
+  }
+
+  function saveSettings() {
+    const rate = parseNum(settingsForm.hourlyRate);
+    if (isNaN(rate) || rate < 0) {
+      setSettingsError("Escreve uma taxa válida (ex: 15 ou 17,50).");
+      return;
+    }
+    if (!/^\d{4}-\d{2}$/.test(settingsForm.marginStart)) {
+      setSettingsError("Escolhe o mês de início.");
+      return;
+    }
+    const tax = parseNum(settingsForm.taxReserve);
+    if (isNaN(tax) || tax < 0 || tax > 100) {
+      setSettingsError("A reserva para impostos é uma percentagem entre 0 e 100.");
+      return;
+    }
+    setSettings({ ...settings, hourlyRate: rate, marginStart: `${settingsForm.marginStart}-01`, taxReserve: tax });
+    setEditingSettings(false);
+  }
+
+  const [filterYear, setFilterYear] = useState("geral");
+  const [filterMonth, setFilterMonth] = useState("geral");
+
+  // Receitas pendentes e despesas não pagas não entram em nenhum cálculo de saldo/margem
+  // — só contam quando marcadas como recebidas/pagas.
+  const receivedIncomes = incomes.filter((i) => i.received !== false);
+  const paidExpenses = expenses.filter((e) => e.received !== false);
+
+  const totalIncome = receivedIncomes.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const totalExpense = paidExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const balance = totalIncome - totalExpense;
+
+  const availableYears = useMemo(() => {
+    const years = new Set();
+    [...receivedIncomes, ...paidExpenses].forEach((item) => years.add(item.date.slice(0, 4)));
+    return Array.from(years).sort();
+  }, [receivedIncomes, paidExpenses]);
+
+  function matchesFilter(dateStr) {
+    if (filterYear !== "geral" && dateStr.slice(0, 4) !== filterYear) return false;
+    if (filterMonth !== "geral" && dateStr.slice(5, 7) !== filterMonth) return false;
+    return true;
+  }
+
+  // A % de lucro só considera dados a partir deste mês — meses anteriores
+  // continuam a contar para o saldo e para o gráfico, mas não para a margem.
+  const marginIncomes = receivedIncomes.filter((i) => i.date >= MARGIN_START);
+  const marginExpenses = paidExpenses.filter((e) => e.date >= MARGIN_START);
+  const marginEvents = events.filter((e) => e.date >= MARGIN_START);
+
+  const marginIncomeTotal = marginIncomes.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const marginExpenseTotal = marginExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const totalHours = useMemo(() => marginEvents.reduce((s, e) => s + (Number(e.hours) || 0), 0), [marginEvents]);
+  const laborCost = totalHours * HOURLY_RATE;
+  const lucro = marginIncomeTotal - marginExpenseTotal - laborCost;
+  const margem = marginIncomeTotal > 0 ? (lucro / marginIncomeTotal) * 100 : 0;
+  const hasMarginData = marginIncomes.length > 0 || marginExpenses.length > 0 || marginEvents.length > 0;
+
+  const monthlyData = useMemo(() => {
+    const map = {};
+    receivedIncomes.filter((i) => matchesFilter(i.date)).forEach((i) => {
+      const k = monthKey(i.date);
+      map[k] = map[k] || { key: k, receitas: 0, despesas: 0 };
+      map[k].receitas += Number(i.amount) || 0;
+    });
+    paidExpenses.filter((e) => matchesFilter(e.date)).forEach((e) => {
+      const k = monthKey(e.date);
+      map[k] = map[k] || { key: k, receitas: 0, despesas: 0 };
+      map[k].despesas += Number(e.amount) || 0;
+    });
+    return Object.values(map)
+      .sort((a, b) => (a.key < b.key ? -1 : 1))
+      .map((row) => ({ ...row, mes: monthLabel(row.key), saldo: row.receitas - row.despesas }));
+  }, [receivedIncomes, paidExpenses, filterYear, filterMonth]);
+
+  // agrupa pelo cliente quando a despesa tem um; senão pela descrição
+  const expenseBreakdown = useMemo(() => {
+    const map = {};
+    paidExpenses.filter((e) => matchesFilter(e.date)).forEach((e) => {
+      const client = e.clientId ? (clients || []).find((c) => c.id === e.clientId) : null;
+      const name = client ? client.name : e.desc;
+      map[name] = (map[name] || 0) + (Number(e.amount) || 0);
+    });
+    return Object.entries(map)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [paidExpenses, clients, filterYear, filterMonth]);
+
+  const clientSummary = useMemo(() => {
+    const map = {};
+    (clients || []).forEach((c) => {
+      map[c.id] = { id: c.id, name: c.name, ganho: 0, gasto: 0, horas: 0 };
+    });
+    events.filter((e) => matchesFilter(e.date)).forEach((e) => {
+      if (!e.clientId || !map[e.clientId]) return;
+      map[e.clientId].horas += Number(e.hours) || 0;
+    });
+    receivedIncomes.filter((i) => matchesFilter(i.date)).forEach((i) => {
+      if (!i.clientId || !map[i.clientId]) return;
+      map[i.clientId].ganho += Number(i.amount) || 0;
+    });
+    paidExpenses.filter((e) => matchesFilter(e.date)).forEach((e) => {
+      if (!e.clientId || !map[e.clientId]) return;
+      map[e.clientId].gasto += Number(e.amount) || 0;
+    });
+    return Object.values(map)
+      .filter((row) => {
+        // clientes terminados só aparecem se tiveram movimento no período
+        const c = (clients || []).find((c) => c.id === row.id);
+        return !(c && isEnded(c) && !row.ganho && !row.gasto && !row.horas);
+      })
+      .map((row) => {
+        const liquido = row.ganho - row.gasto;
+        return { ...row, liquido, lucro: liquido - row.horas * HOURLY_RATE };
+      })
+      .sort((a, b) => b.lucro - a.lucro);
+  }, [clients, receivedIncomes, paidExpenses, events, filterYear, filterMonth, HOURLY_RATE]);
+
+  // O que está por receber, agrupado por cliente (independente dos filtros:
+  // uma dívida antiga continua a ser dívida).
+  const today = todayISO();
+  const pendingIncomes = incomes.filter((i) => i.received === false);
+  const unpaidExpenses = expenses.filter((e) => e.received === false);
+  const totalPending = pendingIncomes.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const totalUnpaid = unpaidExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const forecast = balance + totalPending - totalUnpaid;
+
+  const missingReceipts = incomes.filter(needsReceipt).length;
+  const taxPct = Number(settings.taxReserve) || 0;
+  const taxAmount = balance > 0 ? (balance * taxPct) / 100 : 0;
+
+
+  const receivables = useMemo(() => {
+    const map = {};
+    pendingIncomes.forEach((i) => {
+      const key = i.clientId || "sem-cliente";
+      if (!map[key]) {
+        const c = (clients || []).find((c) => c.id === i.clientId);
+        map[key] = { key, name: c ? c.name : "Sem cliente", total: 0, items: [] };
+      }
+      map[key].total += Number(i.amount) || 0;
+      map[key].items.push(i);
+    });
+    return Object.values(map)
+      .map((g) => ({ ...g, items: g.items.sort((a, b) => (a.date < b.date ? -1 : 1)) }))
+      .sort((a, b) => b.total - a.total);
+  }, [pendingIncomes, clients]);
+
+  const hasData = incomes.length > 0 || expenses.length > 0;
+
+  if (!hasData) {
+    return <p style={{ color: INK_SOFT, fontSize: 14 }}>Ainda não há receitas ou despesas para mostrar no balanço.</p>;
+  }
+
+  return (
+    <div>
+      {/* Summary row */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 0, marginBottom: 14, border: `1px solid ${LINE}`, background: CARD }}>
+        <StatCell label="receitas" value={fmtEUR(totalIncome)} color={INK} icon={<TrendingUp size={14} />} />
+        <StatCell label="despesas" value={fmtEUR(totalExpense)} color={RED} icon={<TrendingDown size={14} />} border />
+        <StatCell label="saldo" value={fmtEUR(balance)} color={balance >= 0 ? GREEN : RED} icon={<Scale size={14} />} border strong />
+        <StatCell label="saldo previsto" value={fmtEUR(forecast)} color={forecast >= 0 ? GOLD : RED} icon={<Clock size={14} />} border />
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", margin: "-6px 0 18px", fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+        {(totalPending > 0 || totalUnpaid > 0) && (
+          <span>previsto = saldo + {fmtEUR(totalPending)} por receber{totalUnpaid > 0 ? ` − ${fmtEUR(totalUnpaid)} por pagar` : ""}</span>
+        )}
+        {taxPct > 0 && balance > 0 && (
+          <span>
+            pôr de parte para impostos ({String(taxPct).replace(".", ",")}%): <span style={{ color: GOLD }}>{fmtEUR(taxAmount)}</span> · livre para gastar:{" "}
+            <span style={{ color: GREEN }}>{fmtEUR(balance - taxAmount)}</span>
+          </span>
+        )}
+        {missingReceipts > 0 && (
+          <span style={{ color: GOLD }}>
+            {missingReceipts} receita{missingReceipts === 1 ? "" : "s"} recebida{missingReceipts === 1 ? "" : "s"} sem recibo registado
+          </span>
+        )}
+      </div>
+
+      <GoalsCard clients={clients} incomes={incomes} settings={settings} setSettings={setSettings} />
+
+      {/* A receber */}
+      {receivables.length > 0 && (
+        <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 28 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+            <div>
+              <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>A receber</h3>
+              <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+                pagamentos pendentes por cliente · os mensais criam logo o do mês seguinte
+              </p>
+            </div>
+            <span style={{ fontSize: 17, fontWeight: 700, color: GOLD, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtEUR(totalPending)}</span>
+          </div>
+          {receivables.map((g) => (
+            <div key={g.key} style={{ borderTop: `1px solid ${LINE}`, padding: "10px 0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 600 }}>
+                <span>{g.name}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: GOLD }}>{fmtEUR(g.total)}</span>
+              </div>
+              {g.items.map((i) => {
+                const d = daysBetween(i.date, today);
+                const late = d > 0;
+                return (
+                  <div key={i.id} style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "4px 12px", marginTop: 5, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                    <span>
+                      {i.date.split("-").reverse().join("/")} · {i.desc}
+                      {i.recurrence === "mensal" ? " · mensal" : ""}
+                    </span>
+                    <span style={{ display: "flex", gap: 10, alignItems: "center", marginLeft: "auto" }}>
+                      <span style={{ color: late ? RED : INK_SOFT }}>
+                        {d === 0 ? "hoje" : late ? `há ${d} dia${d === 1 ? "" : "s"}` : `daqui a ${-d} dia${d === -1 ? "" : "s"}`}
+                      </span>
+                      <span style={{ color: INK }}>{fmtEUR(i.amount)}</span>
+                      <button
+                        onClick={() => setIncomes(markReceived(incomes, i.id))}
+                        aria-label={`marcar ${fmtEUR(i.amount)} de ${g.name} como recebido`}
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 8px", background: "none", border: `1px solid ${GREEN}`, color: GREEN, fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", borderRadius: 2 }}
+                      >
+                        <Check size={11} /> recebido
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Profit margin block */}
+      <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 8, display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, marginBottom: 4 }}>margem de lucro (desde {MONTHS_ABBR[marginMonth - 1].toLowerCase()}. {marginYear})</div>
+          {hasMarginData ? (
+            <div style={{ fontSize: 34, fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace", color: margem >= 0 ? GREEN : RED }}>
+              {margem.toFixed(1)}%
+            </div>
+          ) : (
+            <div style={{ fontSize: 15, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>sem dados ainda</div>
+          )}
+        </div>
+        <div style={{ height: 40, width: 1, background: LINE }} />
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", flex: 1 }}>
+          <MiniStat label={`horas (${MONTHS_ABBR[marginMonth - 1].toLowerCase()}. em diante)`} value={`${totalHours.toFixed(1)} h`} />
+          <MiniStat label={`mão de obra (${HOURLY_RATE}€/h)`} value={fmtEUR(laborCost)} color={RED} />
+          <MiniStat label={`lucro real (${MONTHS_ABBR[marginMonth - 1].toLowerCase()}. em diante)`} value={fmtEUR(lucro)} color={lucro >= 0 ? GREEN : RED} />
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", marginBottom: 24 }}>
+        <p style={{ margin: 0, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+          a margem só conta receitas, despesas e horas a partir de {MONTHS_PT[marginMonth - 1].toLowerCase()} de {marginYear} — meses anteriores contam só para o saldo e o gráfico
+        </p>
+        {!editingSettings && (
+          <button
+            onClick={startEditSettings}
+            style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, color: GOLD, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <Settings size={11} /> definições (taxa, mês, impostos)
+          </button>
+        )}
+      </div>
+      {editingSettings && (
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", padding: 12, border: `1px solid ${GOLD}`, background: HILITE, margin: "-12px 0 24px" }}>
+          <div>
+            <label htmlFor="taxa-horaria" style={fieldLabelStyle}>taxa horária (€/h)</label>
+            <input
+              id="taxa-horaria"
+              value={settingsForm.hourlyRate}
+              onChange={(e) => setSettingsForm({ ...settingsForm, hourlyRate: e.target.value })}
+              type="text"
+              inputMode="decimal"
+              style={{ ...inputStyle, width: 110 }}
+            />
+          </div>
+          <div>
+            <label htmlFor="inicio-margem" style={fieldLabelStyle}>margem conta a partir de</label>
+            <input
+              id="inicio-margem"
+              value={settingsForm.marginStart}
+              onChange={(e) => setSettingsForm({ ...settingsForm, marginStart: e.target.value })}
+              type="month"
+              style={{ ...inputStyle, width: 170 }}
+            />
+          </div>
+          <div>
+            <label htmlFor="reserva-impostos" style={fieldLabelStyle}>reserva para impostos (%)</label>
+            <input
+              id="reserva-impostos"
+              value={settingsForm.taxReserve}
+              onChange={(e) => setSettingsForm({ ...settingsForm, taxReserve: e.target.value })}
+              type="text"
+              inputMode="decimal"
+              style={{ ...inputStyle, width: 110 }}
+            />
+          </div>
+          <button onClick={saveSettings} style={{ padding: "9px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            guardar
+          </button>
+          <button onClick={() => setEditingSettings(false)} style={{ padding: "9px 14px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+            cancelar
+          </button>
+          {settingsError && <p style={{ width: "100%", margin: 0, fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{settingsError}</p>}
+        </div>
+      )}
+
+      {/* Monthly comparison chart */}
+      <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: "20px 20px 8px", marginBottom: 28 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 4 }}>
+          <div>
+            <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Receitas vs. despesas por mês</h3>
+            <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+              evolução mensal e saldo acumulado
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <select
+              value={filterMonth}
+              onChange={(e) => setFilterMonth(e.target.value)}
+              style={{ padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK }}
+            >
+              <option value="geral">Todos os meses</option>
+              {MONTHS_ABBR.map((m, idx) => (
+                <option key={m} value={String(idx + 1).padStart(2, "0")}>{m}</option>
+              ))}
+            </select>
+            <select
+              value={filterYear}
+              onChange={(e) => setFilterYear(e.target.value)}
+              style={{ padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK }}
+            >
+              <option value="geral">Todos os anos</option>
+              {availableYears.map((y) => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
+            {(filterYear !== "geral" || filterMonth !== "geral") && (
+              <button
+                onClick={() => { setFilterYear("geral"); setFilterMonth("geral"); }}
+                style={{ padding: "6px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}
+              >
+                Geral
+              </button>
+            )}
+          </div>
+        </div>
+        {monthlyData.length === 0 ? (
+          <p style={{ color: INK_SOFT, fontSize: 13, padding: "20px 0" }}>Sem dados para este período.</p>
+        ) : (
+        <ResponsiveContainer width="100%" height={260}>
+          <ComposedChart data={monthlyData} margin={{ top: 4, right: 8, left: -12, bottom: 4 }}>
+            <CartesianGrid stroke={LINE} vertical={false} />
+            <XAxis dataKey="mes" tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: INK_SOFT }} axisLine={{ stroke: LINE }} tickLine={false} />
+            <YAxis
+              tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: INK_SOFT }}
+              axisLine={false}
+              tickLine={false}
+              tickFormatter={(v) => `€${v}`}
+            />
+            <Tooltip
+              formatter={(value, name) => [fmtEUR(value), name]}
+              contentStyle={{ background: CARD, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+              labelStyle={{ color: INK, fontFamily: "'Manrope', sans-serif" }}
+            />
+            <Legend wrapperStyle={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", paddingTop: 8 }} />
+            <Bar dataKey="receitas" name="Receitas" fill={GREEN} radius={[2, 2, 0, 0]} barSize={22} />
+            <Bar dataKey="despesas" name="Despesas" fill={RED} radius={[2, 2, 0, 0]} barSize={22} />
+            <Line type="monotone" dataKey="saldo" name="Saldo" stroke={GOLD} strokeWidth={2} dot={{ r: 3, fill: GOLD }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* Expense breakdown pie */}
+      {expenseBreakdown.length > 0 && (
+        <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Onde vai o dinheiro</h3>
+          <p style={{ margin: "0 0 14px", fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+            despesas por cliente (ou descrição, se não tiver cliente) · mesmo período selecionado acima
+          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
+            <ResponsiveContainer width={200} height={200}>
+              <PieChart>
+                <Pie data={expenseBreakdown} dataKey="value" nameKey="name" innerRadius={52} outerRadius={82} paddingAngle={2} stroke={CARD} strokeWidth={2}>
+                  {expenseBreakdown.map((_, idx) => (
+                    <Cell key={idx} fill={PIE_COLORS[idx % PIE_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  formatter={(value) => fmtEUR(value)}
+                  contentStyle={{ background: CARD, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              {expenseBreakdown.map((item, idx) => (
+                <div key={item.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${LINE}`, fontSize: 13 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: PIE_COLORS[idx % PIE_COLORS.length], display: "inline-block" }} />
+                    {item.name}
+                  </span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>{fmtEUR(item.value)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Resumo por cliente/empresa */}
+      {clientSummary.length > 0 && (
+        <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginTop: 28 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Resumo por cliente</h3>
+          <p style={{ margin: "0 0 14px", fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+            quanto cada empresa já rendeu e custou, incluindo as tuas horas a {HOURLY_RATE}€/h · mesmo período selecionado acima
+          </p>
+          <div style={{ overflowX: "auto" }}>
+          <div style={{ minWidth: 560 }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 90px 90px 90px 60px 100px",
+                padding: "8px 4px",
+                fontSize: 11,
+                fontFamily: "'IBM Plex Mono', monospace",
+                color: INK_SOFT,
+                borderBottom: `1px solid ${LINE}`,
+              }}
+            >
+              <span>cliente</span>
+              <span style={{ textAlign: "right" }}>ganhou</span>
+              <span style={{ textAlign: "right" }}>gastou</span>
+              <span style={{ textAlign: "right" }}>líquido</span>
+              <span style={{ textAlign: "right" }}>horas</span>
+              <span style={{ textAlign: "right" }}>lucro real</span>
+            </div>
+            {clientSummary.map((row) => (
+              <div
+                key={row.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 90px 90px 90px 60px 100px",
+                  padding: "10px 4px",
+                  fontSize: 13,
+                  alignItems: "center",
+                  borderBottom: `1px solid ${LINE}`,
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>{row.name}</span>
+                <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: GREEN }}>
+                  {fmtEUR(row.ganho)}
+                </span>
+                <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: RED }}>
+                  {fmtEUR(row.gasto)}
+                </span>
+                <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: row.liquido >= 0 ? INK : RED }}>
+                  {fmtEUR(row.liquido)}
+                </span>
+                <span style={{ textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+                  {row.horas ? `${row.horas} h` : "—"}
+                </span>
+                <span
+                  style={{
+                    textAlign: "right",
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    fontWeight: 700,
+                    color: row.lucro >= 0 ? GREEN : RED,
+                  }}
+                >
+                  {fmtEUR(row.lucro)}
+                </span>
+              </div>
+            ))}
+          </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Tipos de objetivo: novos clientes de qualquer serviço, ou de um serviço.
+const GOAL_TYPES = [
+  { value: "qualquer", label: "Novos clientes (qualquer serviço)", one: "novo cliente", plural: "novos clientes" },
+  { value: "site", label: "Sites", one: "site", plural: "sites" },
+  { value: "redes_sociais", label: "Clientes de redes sociais", one: "cliente de redes sociais", plural: "clientes de redes sociais" },
+  { value: "automacao", label: "Automações", one: "automação", plural: "automações" },
+  { value: "redes_sociais_site", label: "Clientes de redes sociais + site", one: "cliente de redes sociais + site", plural: "clientes de redes sociais + site" },
+];
+
+// Data em que um cliente foi "vendido": o início do contrato, se estiver
+// preenchido; senão, a data da primeira receita desse cliente.
+function saleDate(client, incomes) {
+  if (client.contractStart) return client.contractStart;
+  const dates = incomes.filter((i) => i.clientId === client.id).map((i) => i.date).sort();
+  return dates[0] || null;
+}
+
+// Clientes vendidos num mês (AAAA-MM) que contam para um tipo de objetivo.
+// "Redes sociais + site" conta tanto para sites como para redes sociais.
+function salesInMonth(clients, incomes, month, type) {
+  return (clients || []).filter((c) => {
+    const d = saleDate(c, incomes);
+    if (!d || d.slice(0, 7) !== month) return false;
+    if (type === "qualquer") return true;
+    if (c.serviceType === type) return true;
+    return c.serviceType === "redes_sociais_site" && (type === "site" || type === "redes_sociais");
+  });
+}
+
+function GoalsCard({ clients, incomes, settings, setSettings }) {
+  const goals = settings.goals || [];
+  const thisMonth = todayISO().slice(0, 7);
+  const lastMonth = addMonths(`${thisMonth}-01`, -1).slice(0, 7);
+  const monthName = MONTHS_PT[Number(thisMonth.slice(5, 7)) - 1].toLowerCase();
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ type: "site", target: "" });
+  const [error, setError] = useState("");
+
+  function addGoal() {
+    const target = parseNum(form.target);
+    if (!Number.isInteger(target) || target < 1) {
+      setError("Escreve quantos queres vender (ex: 3).");
+      return;
+    }
+    const others = goals.filter((g) => g.type !== form.type);
+    setSettings({ ...settings, goals: [...others, { id: uid(), type: form.type, target }] });
+    setForm({ type: "site", target: "" });
+    setError("");
+    setAdding(false);
+  }
+
+  function removeGoal(id) {
+    setSettings({ ...settings, goals: goals.filter((g) => g.id !== id) });
+  }
+
+  const small = { padding: "7px 12px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" };
+
+  return (
+    <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: 20, marginBottom: 28 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: goals.length ? 4 : 0 }}>
+        <div>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Objetivos de {monthName}</h3>
+          <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+            {goals.length
+              ? "clientes vendidos este mês · conta o início do contrato ou, sem ele, a primeira receita"
+              : "ainda sem objetivos — por exemplo, vender 3 sites por mês"}
+          </p>
+        </div>
+        {!adding && (
+          <button onClick={() => setAdding(true)} style={{ ...small, display: "flex", alignItems: "center", gap: 6, background: "none", border: `1px solid ${LINE}`, color: INK }}>
+            <Plus size={12} /> objetivo
+          </button>
+        )}
+      </div>
+
+      {adding && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginTop: 14, padding: 12, border: `1px solid ${GOLD}`, background: HILITE }}>
+          <div>
+            <label htmlFor="objetivo-quantos" style={fieldLabelStyle}>vender por mês</label>
+            <input
+              id="objetivo-quantos"
+              value={form.target}
+              onChange={(e) => setForm({ ...form, target: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && addGoal()}
+              type="text"
+              inputMode="numeric"
+              placeholder="3"
+              style={{ ...inputStyle, width: 80 }}
+            />
+          </div>
+          <div style={{ flex: "1 1 200px" }}>
+            <label htmlFor="objetivo-tipo" style={fieldLabelStyle}>de</label>
+            <select id="objetivo-tipo" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} style={inputStyle}>
+              {GOAL_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={addGoal} style={{ ...small, padding: "9px 14px", background: INK, color: PAPER, border: "none" }}>
+            guardar
+          </button>
+          <button onClick={() => { setAdding(false); setError(""); }} style={{ ...small, padding: "9px 14px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}` }}>
+            cancelar
+          </button>
+          {error && <p style={{ width: "100%", margin: 0, fontSize: 12, color: RED, fontFamily: "'IBM Plex Mono', monospace" }}>{error}</p>}
+          {goals.some((g) => g.type === form.type) && (
+            <p style={{ width: "100%", margin: 0, fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace" }}>
+              já tens um objetivo deste tipo — este substitui-o
+            </p>
+          )}
+        </div>
+      )}
+
+      {goals.map((g) => {
+        const type = GOAL_TYPES.find((t) => t.value === g.type) || GOAL_TYPES[0];
+        const sold = salesInMonth(clients, incomes, thisMonth, g.type);
+        const before = salesInMonth(clients, incomes, lastMonth, g.type).length;
+        const done = sold.length >= g.target;
+        const pct = Math.min(100, (sold.length / g.target) * 100);
+        return (
+          <div key={g.id} style={{ borderTop: `1px solid ${LINE}`, marginTop: 14, paddingTop: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: INK }}>{type.label}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 17, fontWeight: 700, color: done ? GREEN : INK }}>{sold.length}</span> de {g.target}
+                </span>
+                <DeleteButton onConfirm={() => removeGoal(g.id)} question="apagar objetivo?" what="objetivo apagado" />
+              </span>
+            </div>
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={g.target}
+              aria-valuenow={sold.length}
+              aria-label={`${type.plural} em ${monthName}`}
+              style={{ height: 8, background: HILITE, border: `1px solid ${LINE}` }}
+            >
+              <div style={{ width: `${pct}%`, height: "100%", background: done ? GREEN : GOLD }} />
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 18px", marginTop: 8, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+              <span style={{ color: done ? GREEN : INK_SOFT }}>
+                {done ? "objetivo atingido" : g.target - sold.length === 1 ? `falta 1 ${type.one}` : `faltam ${g.target - sold.length} ${type.plural}`}
+              </span>
+              {sold.length > 0 && <span>{sold.map((c) => c.name).join(", ")}</span>}
+              <span>mês anterior: {before}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 15, fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace", color: color || INK }}>{value}</div>
+    </div>
+  );
+}
+
+// Faturação de um mês e prevista desse mês até ao fim do ano.
+// Conta as receitas registadas (recebidas ou por receber) e acrescenta:
+// - as ocorrências recorrentes ainda não criadas: as mensais continuam todos
+//   os meses a partir da mais recente da série (mesmo cliente e descrição),
+//   as anuais renovam 12 meses depois;
+// - os contratos das fichas dos clientes (valor + início), para clientes que
+//   ainda não têm essa série nas Receitas: mensais e anuais a partir do início
+//   (nunca em meses já passados) até ao fim do contrato, saltando os meses em
+//   que esse cliente já tem receita registada; uma compra única sem receitas
+//   conta no mês do início ou, sem data, como prevista até ao fim do ano
+//   (só no ano atual ou seguintes), listada também em `unscheduled`.
+// Clientes terminados não têm nada previsto. `month` 0 = ano inteiro.
+function billingForecast(incomes, clients, year, month, today = todayISO()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const wholeYear = !month;
+  const monthKeyStr = wholeYear ? null : `${year}-${pad(month)}`;
+  const yearStart = `${year}-01-01`;
+  const rangeStart = wholeYear ? yearStart : `${monthKeyStr}-01`;
+  const yearEnd = `${year}-12-31`;
+  const clientById = new Map((clients || []).map((c) => [c.id, c]));
+  const ended = (c) => c.ended === true || (c.ended !== false && !!c.contractEnd && c.contractEnd < today);
+  const amountOf = (i) => Number(i.amount) || 0;
+
+  // ocorrências recorrentes por criar, até ao fim do ano
+  const projected = [];
+  const series = new Map();
+  for (const i of incomes) {
+    if (i.recurrence !== "mensal" && i.recurrence !== "anual") continue;
+    const key = `${i.recurrence}|${i.clientId || ""}|${i.desc}`;
+    const s = series.get(key) || { items: [] };
+    s.items.push(i);
+    series.set(key, s);
+  }
+  for (const { items } of series.values()) {
+    const last = items.reduce((a, b) => (b.date > a.date ? b : a));
+    const client = last.clientId ? clientById.get(last.clientId) : null;
+    if (client && ended(client)) continue;
+    const step = last.recurrence === "mensal" ? 1 : 12;
+    const anchorDay = last.recurrence === "mensal" ? Math.max(...items.map((i) => Number(i.date.slice(8, 10)))) : undefined;
+    for (let k = 1; ; k++) {
+      const date = addMonths(last.date, step * k, anchorDay);
+      if (date > yearEnd) break;
+      projected.push({ clientId: last.clientId || null, date, amount: amountOf(last) });
+    }
+  }
+
+  // contratos das fichas de clientes
+  const currentMonthStart = `${today.slice(0, 7)}-01`;
+  const seriesClients = new Set([...series.values()].map(({ items }) => `${items[0].recurrence}|${items[0].clientId || ""}`));
+  const incomeMonths = new Map();
+  for (const i of incomes) {
+    if (!i.clientId) continue;
+    if (!incomeMonths.has(i.clientId)) incomeMonths.set(i.clientId, new Set());
+    incomeMonths.get(i.clientId).add(i.date.slice(0, 7));
+  }
+  const unscheduled = [];
+  for (const c of clients || []) {
+    const value = Number(c.contractValue) || 0;
+    if (!value || ended(c)) continue;
+    const months = incomeMonths.get(c.id) || new Set();
+    if (c.status === "compra_unica") {
+      if (months.size) continue;
+      if (c.contractStart) projected.push({ clientId: c.id, date: c.contractStart, amount: value });
+      else unscheduled.push({ id: c.id, name: c.name, amount: value });
+      continue;
+    }
+    const step = c.status === "mensal" ? 1 : c.status === "anual" ? 12 : 0;
+    if (!step || !c.contractStart || seriesClients.has(`${c.status}|${c.id}`)) continue;
+    const end = c.contractEnd && c.contractEnd < yearEnd ? c.contractEnd : yearEnd;
+    for (let k = 0; ; k++) {
+      const date = addMonths(c.contractStart, step * k);
+      if (date > end) break;
+      if (date < currentMonthStart || months.has(date.slice(0, 7))) continue;
+      projected.push({ clientId: c.id, date, amount: value });
+    }
+  }
+
+  const rows = new Map();
+  const rowFor = (clientId) => {
+    const id = clientId || null;
+    if (!rows.has(id)) {
+      const c = id ? clientById.get(id) : null;
+      rows.set(id, { id, name: c ? c.name : id ? "Cliente removido" : "Sem cliente", month: 0, forecast: 0 });
+    }
+    return rows.get(id);
+  };
+
+  const result = {
+    month: { total: 0, received: 0, pending: 0 },
+    forecast: { total: 0, registered: 0, projected: 0 },
+    yearTotal: 0,
+  };
+  for (const i of incomes) {
+    const a = amountOf(i);
+    if (i.date >= yearStart && i.date <= yearEnd) result.yearTotal += a;
+    if (wholeYear ? i.date >= yearStart && i.date <= yearEnd : i.date.slice(0, 7) === monthKeyStr) {
+      result.month.total += a;
+      result.month[i.received === false ? "pending" : "received"] += a;
+      rowFor(i.clientId).month += a;
+    }
+    if (i.date >= rangeStart && i.date <= yearEnd) {
+      result.forecast.registered += a;
+      rowFor(i.clientId).forecast += a;
+    }
+  }
+  for (const p of projected) {
+    if (p.date > yearEnd) continue;
+    if (p.date >= yearStart) result.yearTotal += p.amount;
+    if (p.date >= rangeStart) {
+      result.forecast.projected += p.amount;
+      rowFor(p.clientId).forecast += p.amount;
+    }
+  }
+  if (year >= Number(today.slice(0, 4))) {
+    for (const u of unscheduled) {
+      result.yearTotal += u.amount;
+      result.forecast.projected += u.amount;
+      rowFor(u.id).forecast += u.amount;
+    }
+  }
+  result.forecast.total = result.forecast.registered + result.forecast.projected;
+  result.unscheduled = year >= Number(today.slice(0, 4)) ? unscheduled : [];
+  result.clients = [...rows.values()].filter((r) => r.month || r.forecast).sort((a, b) => b.forecast - a.forecast || b.month - a.month);
+  return result;
+}
+
+function FaturacaoView({ incomes, clients }) {
+  const today = todayISO();
+  const [year, setYear] = useState(Number(today.slice(0, 4)));
+  const [month, setMonth] = useState(Number(today.slice(5, 7)));
+  const [wholeYear, setWholeYear] = useState(false);
+  const years = useMemo(() => {
+    const set = new Set(incomes.map((i) => Number(i.date.slice(0, 4))));
+    set.add(Number(today.slice(0, 4)));
+    return [...set].sort();
+  }, [incomes, today]);
+  const r = useMemo(() => billingForecast(incomes, clients, year, wholeYear ? 0 : month, today), [incomes, clients, year, month, wholeYear, today]);
+  const monthName = MONTHS_PT[month - 1].toLowerCase();
+  const rangeLabel = wholeYear ? "janeiro a dezembro" : month === 12 ? "dezembro" : `${monthName} a dezembro`;
+    const chartData = r.clients.map((c) => ({ name: c.name, mes: c.month, previsto: c.forecast }));
+  const mono = "'IBM Plex Mono', monospace";
+  const selectStyle = { padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 700 }}>Faturação</h2>
+          <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: mono }}>
+            receitas registadas (recebidas ou por receber), mensalidades e renovações previstas e contratos dos clientes
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <select aria-label="mês" value={month} disabled={wholeYear} onChange={(e) => setMonth(Number(e.target.value))} style={{ ...selectStyle, opacity: wholeYear ? 0.45 : 1 }}>
+            {MONTHS_PT.map((m, idx) => (
+              <option key={m} value={idx + 1}>{m}</option>
+            ))}
+          </select>
+          <select aria-label="ano" value={year} onChange={(e) => setYear(Number(e.target.value))} style={selectStyle}>
+            {years.map((y) => (
+              <option key={y} value={y}>{y}</option>
+            ))}
+          </select>
+          <button
+            onClick={() => setWholeYear(!wholeYear)}
+            aria-pressed={wholeYear}
+            style={{ padding: "6px 12px", border: `1px solid ${wholeYear ? GOLD : LINE}`, background: wholeYear ? HILITE : PAPER, color: wholeYear ? GOLD : INK, fontSize: 12, fontFamily: mono }}
+          >
+            Ano inteiro
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", border: `1px solid ${LINE}`, background: CARD, marginBottom: 8 }}>
+        <div style={{ flex: "1 1 200px", padding: "14px 16px" }}>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>{wholeYear ? `faturação registada em ${year}` : `faturação de ${monthName}`}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: INK, marginTop: 4 }}>{fmtEUR(r.month.total)}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>
+            <span style={{ color: GREEN }}>{fmtEUR(r.month.received)}</span> recebido · <span style={{ color: GOLD }}>{fmtEUR(r.month.pending)}</span> por receber
+          </div>
+        </div>
+        <div style={{ flex: "1 1 200px", padding: "14px 16px", borderLeft: `1px solid ${LINE}`, background: HILITE }}>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>{wholeYear ? `prevista para ${year} (janeiro a dezembro)` : `prevista de ${rangeLabel}`}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: GOLD, marginTop: 4 }}>{fmtEUR(r.forecast.total)}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>
+            {fmtEUR(r.forecast.registered)} registado · {fmtEUR(r.forecast.projected)} de mensalidades, contratos e compras únicas por faturar
+          </div>
+        </div>
+        <div style={{ flex: "1 1 200px", padding: "14px 16px", borderLeft: `1px solid ${LINE}` }}>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>{wholeYear ? `ainda por faturar em ${year}` : `total previsto em ${year}`}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: INK, marginTop: 4 }}>{fmtEUR(wholeYear ? r.forecast.projected : r.yearTotal)}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>{wholeYear ? "mensalidades, contratos e compras únicas" : "janeiro a dezembro"}</div>
+        </div>
+      </div>
+      <p style={{ margin: "0 0 24px", fontSize: 11, color: INK_SOFT, fontFamily: mono }}>
+        a previsão continua cada mensalidade todos os meses (ao valor mais recente), cada renovação anual 12 meses depois e soma os contratos das fichas de clientes (valor e início) que ainda não têm receitas; clientes terminados ficam de fora
+      </p>
+      {r.unscheduled.length > 0 && (
+        <div style={{ border: `1px dashed ${GOLD}`, padding: "12px 16px", margin: "-8px 0 24px", fontSize: 12, fontFamily: mono, color: INK_SOFT }}>
+          <span style={{ color: GOLD }}>compras únicas sem data, incluídas na previsão: {fmtEUR(r.unscheduled.reduce((s, u) => s + u.amount, 0))}</span>
+          {" · "}
+          {r.unscheduled.map((u) => `${u.name} (${fmtEUR(u.amount)})`).join(", ")}
+          {" — "}valor na ficha do cliente e ainda sem receitas; põe o início do contrato para ficarem no mês certo
+        </div>
+      )}
+
+      {r.clients.length === 0 ? (
+        <p style={{ color: INK_SOFT, fontSize: 14 }}>Sem faturação de {rangeLabel} de {year}.</p>
+      ) : (
+        <>
+          <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: "20px 20px 8px", marginBottom: 28 }}>
+            <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Por cliente</h3>
+            <p style={{ margin: "0 0 10px", fontSize: 12, color: INK_SOFT, fontFamily: mono }}>
+              {wholeYear ? `registado e previsto em ${year}` : `${monthName} e previsto de ${rangeLabel} de ${year}`}
+            </p>
+            <ResponsiveContainer width="100%" height={Math.max(160, chartData.length * 54 + 50)}>
+              <ComposedChart data={chartData} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
+                <CartesianGrid stroke={LINE} horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: INK_SOFT }} axisLine={{ stroke: LINE }} tickLine={false} tickFormatter={(v) => `€${v}`} />
+                <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11, fill: INK }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  formatter={(value, name) => [fmtEUR(value), name]}
+                  contentStyle={{ background: CARD, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: mono }}
+                  labelStyle={{ color: INK }}
+                />
+                <Legend wrapperStyle={{ fontSize: 12, fontFamily: mono, paddingTop: 8 }} />
+                <Bar dataKey="mes" name={wholeYear ? `Registada em ${year}` : `Faturação de ${monthName}`} fill={GREEN} radius={[0, 2, 2, 0]} barSize={14} />
+                <Bar dataKey="previsto" name={wholeYear ? `Prevista para ${year}` : `Prevista de ${rangeLabel}`} fill={GOLD} radius={[0, 2, 2, 0]} barSize={14} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, background: CARD }}>
+            <table aria-label={wholeYear ? `faturação por cliente em ${year}` : `faturação por cliente em ${monthName} de ${year}`} style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, textAlign: "right" }}>
+                  <th scope="col" style={{ textAlign: "left", padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>cliente</th>
+                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{wholeYear ? "registado" : monthName}</th>
+                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{wholeYear ? "previsto no ano" : rangeLabel}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.clients.map((c) => (
+                  <tr key={c.id || "sem-cliente"} className="row-hover">
+                    <th scope="row" style={{ textAlign: "left", padding: "10px 12px", fontWeight: 600, borderBottom: `1px solid ${LINE}` }}>{c.name}</th>
+                    <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono, color: c.month ? GREEN : INK_SOFT, borderBottom: `1px solid ${LINE}` }}>{fmtEUR(c.month)}</td>
+                    <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono, color: GOLD, borderBottom: `1px solid ${LINE}` }}>{fmtEUR(c.forecast)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ fontWeight: 700, background: HILITE }}>
+                  <th scope="row" style={{ textAlign: "left", padding: "10px 12px", fontFamily: mono, fontSize: 11, fontWeight: 400, color: INK_SOFT }}>total</th>
+                  <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono }}>{fmtEUR(r.month.total)}</td>
+                  <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono, color: GOLD }}>{fmtEUR(r.forecast.total)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function CalendarView({ events, setEvents, clients }) {
+  const [cursor, setCursor] = useState(() => {
+    const d = new Date();
+    return { year: d.getFullYear(), month: d.getMonth() };
+  });
+  const [selectedDate, setSelectedDate] = useState(todayISO());
+  const [newEvent, setNewEvent] = useState("");
+  const [newHours, setNewHours] = useState("");
+  const [newClientId, setNewClientId] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+
+  const { year, month } = cursor;
+  const firstDay = new Date(year, month, 1);
+  const startWeekday = (firstDay.getDay() + 6) % 7; // Monday = 0
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  function isoFor(day) {
+    return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  function changeMonth(delta) {
+    let m = month + delta;
+    let y = year;
+    if (m < 0) { m = 11; y -= 1; }
+    if (m > 11) { m = 0; y += 1; }
+    setCursor({ year: y, month: m });
+  }
+
+  const eventsByDate = useMemo(() => {
+    const map = {};
+    events.forEach((ev) => {
+      map[ev.date] = map[ev.date] || [];
+      map[ev.date].push(ev);
+    });
+    return map;
+  }, [events]);
+
+  function addEvent() {
+    if (!newEvent.trim()) return;
+    setEvents([
+      ...events,
+      { id: uid(), date: selectedDate, text: newEvent.trim(), hours: newHours ? Number(newHours) : 0, clientId: newClientId || null },
+    ]);
+    setNewEvent("");
+    setNewHours("");
+    setNewClientId("");
+  }
+
+  function removeEvent(id) {
+    setEvents(events.filter((e) => e.id !== id));
+  }
+
+  function startEdit(ev) {
+    setEditingId(ev.id);
+    setEditForm({ text: ev.text, hours: ev.hours ? String(ev.hours) : "", clientId: ev.clientId || "" });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditForm(null);
+  }
+
+  function saveEdit(id) {
+    if (!editForm.text.trim()) return;
+    setEvents(
+      events.map((e) =>
+        e.id === id
+          ? { ...e, text: editForm.text.trim(), hours: editForm.hours ? Number(editForm.hours) : 0, clientId: editForm.clientId || null }
+          : e
+      )
+    );
+    setEditingId(null);
+    setEditForm(null);
+  }
+
+  const selectedEvents = eventsByDate[selectedDate] || [];
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <button onClick={() => changeMonth(-1)} style={{ background: "none", border: `1px solid ${LINE}`, padding: 6 }}>
+          <ChevronLeft size={16} color={INK} />
+        </button>
+        <span style={{ fontSize: 16, fontWeight: 600 }}>
+          {MONTHS_PT[month]} {year}
+        </span>
+        <button onClick={() => changeMonth(1)} style={{ background: "none", border: `1px solid ${LINE}`, padding: 6 }}>
+          <ChevronRight size={16} color={INK} />
+        </button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 1, background: LINE, border: `1px solid ${LINE}` }}>
+        {DAYS_PT.map((d) => (
+          <div key={d} style={{ background: PAPER, textAlign: "center", fontSize: 11, color: INK_SOFT, fontFamily: "'IBM Plex Mono', monospace", padding: "6px 0" }}>
+            {d}
+          </div>
+        ))}
+        {cells.map((day, idx) => {
+          if (day === null) return <div key={idx} style={{ background: PAPER, minHeight: 56 }} />;
+          const iso = isoFor(day);
+          const has = eventsByDate[iso];
+          const isSelected = iso === selectedDate;
+          const isToday = iso === todayISO();
+          return (
+            <button
+              key={idx}
+              onClick={() => setSelectedDate(iso)}
+              style={{
+                background: isSelected ? HILITE : CARD,
+                border: isSelected ? `1px solid ${GOLD}` : "1px solid transparent",
+                minHeight: 56,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "flex-start",
+                padding: "6px 6px",
+                position: "relative",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 12,
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  color: isToday ? GOLD : INK,
+                  fontWeight: isToday ? 700 : 400,
+                }}
+              >
+                {day}
+              </span>
+              {has && (
+                <span
+                  style={{
+                    marginTop: "auto",
+                    width: 5,
+                    height: 5,
+                    borderRadius: "50%",
+                    background: GOLD,
+                  }}
+                />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ marginTop: 22 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <CalendarDays size={14} color={INK_SOFT} />
+          <span style={{ fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT }}>
+            {selectedDate.slice(8, 10)}/{selectedDate.slice(5, 7)}/{selectedDate.slice(0, 4)}
+          </span>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+          <input
+            value={newEvent}
+            onChange={(e) => setNewEvent(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addEvent()}
+            placeholder="Adicionar nota ou compromisso…"
+            style={{ flex: "1 1 160px", padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
+          />
+          <select
+            value={newClientId}
+            onChange={(e) => setNewClientId(e.target.value)}
+            style={{ flex: "1 1 140px", padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
+          >
+            <option value="">sem cliente</option>
+            {(clients || []).filter((c) => !isEnded(c))
+              .map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+          </select>
+          <input
+            value={newHours}
+            onChange={(e) => setNewHours(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addEvent()}
+            type="number"
+            step="0.5"
+            min="0"
+            placeholder="horas"
+            style={{ width: 80, padding: "9px 10px", border: `1px solid ${LINE}`, background: CARD, fontSize: 13, color: INK }}
+          />
+          <button
+            onClick={addEvent}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", background: INK, color: PAPER, border: "none", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <Plus size={14} /> adicionar
+          </button>
+        </div>
+
+        {selectedEvents.length === 0 ? (
+          <p style={{ color: INK_SOFT, fontSize: 13 }}>Sem notas para este dia.</p>
+        ) : (
+          <div style={{ border: `1px solid ${LINE}`, background: CARD }}>
+            {selectedEvents.map((ev) => {
+              const client = ev.clientId ? (clients || []).find((c) => c.id === ev.clientId) : null;
+
+              if (editingId === ev.id) {
+                return (
+                  <div key={ev.id} style={{ padding: "10px 12px", borderBottom: `1px solid ${LINE}`, background: HILITE }}>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                      <input
+                        value={editForm.text}
+                        onChange={(e) => setEditForm({ ...editForm, text: e.target.value })}
+                        style={{ flex: "1 1 160px", padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                      />
+                      <select
+                        value={editForm.clientId}
+                        onChange={(e) => setEditForm({ ...editForm, clientId: e.target.value })}
+                        style={{ flex: "1 1 130px", padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                      >
+                        <option value="">sem cliente</option>
+                        {(clients || []).filter((c) => !isEnded(c) || c.id === editForm.clientId)
+                          .map((c) => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                          ))}
+                      </select>
+                      <input
+                        value={editForm.hours}
+                        onChange={(e) => setEditForm({ ...editForm, hours: e.target.value })}
+                        type="number"
+                        step="0.5"
+                        min="0"
+                        placeholder="horas"
+                        style={{ width: 80, padding: "7px 9px", border: `1px solid ${GOLD}`, background: CARD, fontSize: 13, color: INK }}
+                      />
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => saveEdit(ev.id)} style={{ padding: "6px 14px", background: INK, color: PAPER, border: "none", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                        guardar
+                      </button>
+                      <button onClick={cancelEdit} style={{ padding: "6px 14px", background: "none", color: INK_SOFT, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
+                        cancelar
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+              <div
+                key={ev.id}
+                className="row-hover"
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 12px", borderBottom: `1px solid ${LINE}`, fontSize: 13 }}
+              >
+                <span>
+                  {ev.text}
+                  {client && (
+                    <span style={{ marginLeft: 8, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: INK_SOFT, border: `1px solid ${LINE}`, padding: "1px 6px", borderRadius: 2 }}>
+                      {client.name}
+                    </span>
+                  )}
+                  {ev.hours > 0 && (
+                    <span style={{ marginLeft: 8, fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: GOLD }}>
+                      · {ev.hours}h
+                    </span>
+                  )}
+                </span>
+                <span style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => startEdit(ev)} style={{ background: "none", border: "none", color: INK_SOFT, display: "flex" }} aria-label="editar">
+                    <Pencil size={14} />
+                  </button>
+                  <DeleteButton onConfirm={() => removeEvent(ev.id)} what="registo do calendário apagado" />
+                </span>
+              </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// usadas pelos testes (App.test.jsx)
+export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText, salesInMonth, isEnded, monthlyValue, needsReceipt, billingForecast };
