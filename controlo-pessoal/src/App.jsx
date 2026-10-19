@@ -2890,13 +2890,15 @@ function MiniStat({ label, value, color }) {
 //   ainda não têm essa série nas Receitas: mensais e anuais a partir do início
 //   (nunca em meses já passados) até ao fim do contrato, saltando os meses em
 //   que esse cliente já tem receita registada; uma compra única sem receitas
-//   conta no mês do início ou, sem data, fica em `unscheduled`.
-// Clientes terminados não têm nada previsto.
+//   conta no mês do início ou, sem data, como prevista até ao fim do ano
+//   (só no ano atual ou seguintes), listada também em `unscheduled`.
+// Clientes terminados não têm nada previsto. `month` 0 = ano inteiro.
 function billingForecast(incomes, clients, year, month, today = todayISO()) {
   const pad = (n) => String(n).padStart(2, "0");
-  const monthKeyStr = `${year}-${pad(month)}`;
-  const rangeStart = `${monthKeyStr}-01`;
+  const wholeYear = !month;
+  const monthKeyStr = wholeYear ? null : `${year}-${pad(month)}`;
   const yearStart = `${year}-01-01`;
+  const rangeStart = wholeYear ? yearStart : `${monthKeyStr}-01`;
   const yearEnd = `${year}-12-31`;
   const clientById = new Map((clients || []).map((c) => [c.id, c]));
   const ended = (c) => c.ended === true || (c.ended !== false && !!c.contractEnd && c.contractEnd < today);
@@ -2974,7 +2976,7 @@ function billingForecast(incomes, clients, year, month, today = todayISO()) {
   for (const i of incomes) {
     const a = amountOf(i);
     if (i.date >= yearStart && i.date <= yearEnd) result.yearTotal += a;
-    if (i.date.slice(0, 7) === monthKeyStr) {
+    if (wholeYear ? i.date >= yearStart && i.date <= yearEnd : i.date.slice(0, 7) === monthKeyStr) {
       result.month.total += a;
       result.month[i.received === false ? "pending" : "received"] += a;
       rowFor(i.clientId).month += a;
@@ -2992,8 +2994,15 @@ function billingForecast(incomes, clients, year, month, today = todayISO()) {
       rowFor(p.clientId).forecast += p.amount;
     }
   }
+  if (year >= Number(today.slice(0, 4))) {
+    for (const u of unscheduled) {
+      result.yearTotal += u.amount;
+      result.forecast.projected += u.amount;
+      rowFor(u.id).forecast += u.amount;
+    }
+  }
   result.forecast.total = result.forecast.registered + result.forecast.projected;
-  result.unscheduled = unscheduled;
+  result.unscheduled = year >= Number(today.slice(0, 4)) ? unscheduled : [];
   result.clients = [...rows.values()].filter((r) => r.month || r.forecast).sort((a, b) => b.forecast - a.forecast || b.month - a.month);
   return result;
 }
@@ -3002,15 +3011,16 @@ function FaturacaoView({ incomes, clients }) {
   const today = todayISO();
   const [year, setYear] = useState(Number(today.slice(0, 4)));
   const [month, setMonth] = useState(Number(today.slice(5, 7)));
+  const [wholeYear, setWholeYear] = useState(false);
   const years = useMemo(() => {
     const set = new Set(incomes.map((i) => Number(i.date.slice(0, 4))));
     set.add(Number(today.slice(0, 4)));
     return [...set].sort();
   }, [incomes, today]);
-  const r = useMemo(() => billingForecast(incomes, clients, year, month, today), [incomes, clients, year, month, today]);
+  const r = useMemo(() => billingForecast(incomes, clients, year, wholeYear ? 0 : month, today), [incomes, clients, year, month, wholeYear, today]);
   const monthName = MONTHS_PT[month - 1].toLowerCase();
-  const rangeLabel = month === 12 ? "dezembro" : `${monthName} a dezembro`;
-  const chartData = r.clients.map((c) => ({ name: c.name, mes: c.month, previsto: c.forecast }));
+  const rangeLabel = wholeYear ? "janeiro a dezembro" : month === 12 ? "dezembro" : `${monthName} a dezembro`;
+    const chartData = r.clients.map((c) => ({ name: c.name, mes: c.month, previsto: c.forecast }));
   const mono = "'IBM Plex Mono', monospace";
   const selectStyle = { padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK };
 
@@ -3024,7 +3034,7 @@ function FaturacaoView({ incomes, clients }) {
           </p>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          <select aria-label="mês" value={month} onChange={(e) => setMonth(Number(e.target.value))} style={selectStyle}>
+          <select aria-label="mês" value={month} disabled={wholeYear} onChange={(e) => setMonth(Number(e.target.value))} style={{ ...selectStyle, opacity: wholeYear ? 0.45 : 1 }}>
             {MONTHS_PT.map((m, idx) => (
               <option key={m} value={idx + 1}>{m}</option>
             ))}
@@ -3034,28 +3044,35 @@ function FaturacaoView({ incomes, clients }) {
               <option key={y} value={y}>{y}</option>
             ))}
           </select>
+          <button
+            onClick={() => setWholeYear(!wholeYear)}
+            aria-pressed={wholeYear}
+            style={{ padding: "6px 12px", border: `1px solid ${wholeYear ? GOLD : LINE}`, background: wholeYear ? HILITE : PAPER, color: wholeYear ? GOLD : INK, fontSize: 12, fontFamily: mono }}
+          >
+            Ano inteiro
+          </button>
         </div>
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", border: `1px solid ${LINE}`, background: CARD, marginBottom: 8 }}>
         <div style={{ flex: "1 1 200px", padding: "14px 16px" }}>
-          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>faturação de {monthName}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>{wholeYear ? `faturação registada em ${year}` : `faturação de ${monthName}`}</div>
           <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: INK, marginTop: 4 }}>{fmtEUR(r.month.total)}</div>
           <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>
             <span style={{ color: GREEN }}>{fmtEUR(r.month.received)}</span> recebido · <span style={{ color: GOLD }}>{fmtEUR(r.month.pending)}</span> por receber
           </div>
         </div>
         <div style={{ flex: "1 1 200px", padding: "14px 16px", borderLeft: `1px solid ${LINE}`, background: HILITE }}>
-          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>prevista de {rangeLabel}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>{wholeYear ? `prevista para ${year} (janeiro a dezembro)` : `prevista de ${rangeLabel}`}</div>
           <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: GOLD, marginTop: 4 }}>{fmtEUR(r.forecast.total)}</div>
           <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>
-            {fmtEUR(r.forecast.registered)} registado · {fmtEUR(r.forecast.projected)} de mensalidades e contratos por faturar
+            {fmtEUR(r.forecast.registered)} registado · {fmtEUR(r.forecast.projected)} de mensalidades, contratos e compras únicas por faturar
           </div>
         </div>
         <div style={{ flex: "1 1 200px", padding: "14px 16px", borderLeft: `1px solid ${LINE}` }}>
-          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>total previsto em {year}</div>
-          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: INK, marginTop: 4 }}>{fmtEUR(r.yearTotal)}</div>
-          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>janeiro a dezembro</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>{wholeYear ? `ainda por faturar em ${year}` : `total previsto em ${year}`}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: INK, marginTop: 4 }}>{fmtEUR(wholeYear ? r.forecast.projected : r.yearTotal)}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>{wholeYear ? "mensalidades, contratos e compras únicas" : "janeiro a dezembro"}</div>
         </div>
       </div>
       <p style={{ margin: "0 0 24px", fontSize: 11, color: INK_SOFT, fontFamily: mono }}>
@@ -3063,10 +3080,10 @@ function FaturacaoView({ incomes, clients }) {
       </p>
       {r.unscheduled.length > 0 && (
         <div style={{ border: `1px dashed ${GOLD}`, padding: "12px 16px", margin: "-8px 0 24px", fontSize: 12, fontFamily: mono, color: INK_SOFT }}>
-          <span style={{ color: GOLD }}>por faturar, sem data: {fmtEUR(r.unscheduled.reduce((s, u) => s + u.amount, 0))}</span>
+          <span style={{ color: GOLD }}>compras únicas sem data, incluídas na previsão: {fmtEUR(r.unscheduled.reduce((s, u) => s + u.amount, 0))}</span>
           {" · "}
           {r.unscheduled.map((u) => `${u.name} (${fmtEUR(u.amount)})`).join(", ")}
-          {" — "}compras únicas com valor na ficha do cliente e sem receitas; põe o início do contrato para entrarem na previsão
+          {" — "}valor na ficha do cliente e ainda sem receitas; põe o início do contrato para ficarem no mês certo
         </div>
       )}
 
@@ -3077,7 +3094,7 @@ function FaturacaoView({ incomes, clients }) {
           <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: "20px 20px 8px", marginBottom: 28 }}>
             <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Por cliente</h3>
             <p style={{ margin: "0 0 10px", fontSize: 12, color: INK_SOFT, fontFamily: mono }}>
-              {monthName} e previsto de {rangeLabel} de {year}
+              {wholeYear ? `registado e previsto em ${year}` : `${monthName} e previsto de ${rangeLabel} de ${year}`}
             </p>
             <ResponsiveContainer width="100%" height={Math.max(160, chartData.length * 54 + 50)}>
               <ComposedChart data={chartData} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
@@ -3090,19 +3107,19 @@ function FaturacaoView({ incomes, clients }) {
                   labelStyle={{ color: INK }}
                 />
                 <Legend wrapperStyle={{ fontSize: 12, fontFamily: mono, paddingTop: 8 }} />
-                <Bar dataKey="mes" name={`Faturação de ${monthName}`} fill={GREEN} radius={[0, 2, 2, 0]} barSize={14} />
-                <Bar dataKey="previsto" name={`Prevista de ${rangeLabel}`} fill={GOLD} radius={[0, 2, 2, 0]} barSize={14} />
+                <Bar dataKey="mes" name={wholeYear ? `Registada em ${year}` : `Faturação de ${monthName}`} fill={GREEN} radius={[0, 2, 2, 0]} barSize={14} />
+                <Bar dataKey="previsto" name={wholeYear ? `Prevista para ${year}` : `Prevista de ${rangeLabel}`} fill={GOLD} radius={[0, 2, 2, 0]} barSize={14} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
 
           <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, background: CARD }}>
-            <table aria-label={`faturação por cliente em ${monthName} de ${year}`} style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <table aria-label={wholeYear ? `faturação por cliente em ${year}` : `faturação por cliente em ${monthName} de ${year}`} style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
                 <tr style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, textAlign: "right" }}>
                   <th scope="col" style={{ textAlign: "left", padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>cliente</th>
-                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{monthName}</th>
-                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{rangeLabel}</th>
+                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{wholeYear ? "registado" : monthName}</th>
+                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{wholeYear ? "previsto no ano" : rangeLabel}</th>
                 </tr>
               </thead>
               <tbody>
