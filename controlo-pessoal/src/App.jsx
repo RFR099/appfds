@@ -2882,11 +2882,16 @@ function MiniStat({ label, value, color }) {
 }
 
 // Faturação de um mês e prevista desse mês até ao fim do ano.
-// Conta as receitas registadas (recebidas ou por receber) e acrescenta as
-// ocorrências recorrentes que ainda não foram criadas: as mensais continuam
-// todos os meses a partir da mais recente da série (mesmo cliente e
-// descrição), as anuais renovam 12 meses depois. Clientes terminados não
-// têm ocorrências previstas.
+// Conta as receitas registadas (recebidas ou por receber) e acrescenta:
+// - as ocorrências recorrentes ainda não criadas: as mensais continuam todos
+//   os meses a partir da mais recente da série (mesmo cliente e descrição),
+//   as anuais renovam 12 meses depois;
+// - os contratos das fichas dos clientes (valor + início), para clientes que
+//   ainda não têm essa série nas Receitas: mensais e anuais a partir do início
+//   (nunca em meses já passados) até ao fim do contrato, saltando os meses em
+//   que esse cliente já tem receita registada; uma compra única sem receitas
+//   conta no mês do início ou, sem data, fica em `unscheduled`.
+// Clientes terminados não têm nada previsto.
 function billingForecast(incomes, clients, year, month, today = todayISO()) {
   const pad = (n) => String(n).padStart(2, "0");
   const monthKeyStr = `${year}-${pad(month)}`;
@@ -2920,6 +2925,37 @@ function billingForecast(incomes, clients, year, month, today = todayISO()) {
     }
   }
 
+  // contratos das fichas de clientes
+  const currentMonthStart = `${today.slice(0, 7)}-01`;
+  const seriesClients = new Set([...series.values()].map(({ items }) => `${items[0].recurrence}|${items[0].clientId || ""}`));
+  const incomeMonths = new Map();
+  for (const i of incomes) {
+    if (!i.clientId) continue;
+    if (!incomeMonths.has(i.clientId)) incomeMonths.set(i.clientId, new Set());
+    incomeMonths.get(i.clientId).add(i.date.slice(0, 7));
+  }
+  const unscheduled = [];
+  for (const c of clients || []) {
+    const value = Number(c.contractValue) || 0;
+    if (!value || ended(c)) continue;
+    const months = incomeMonths.get(c.id) || new Set();
+    if (c.status === "compra_unica") {
+      if (months.size) continue;
+      if (c.contractStart) projected.push({ clientId: c.id, date: c.contractStart, amount: value });
+      else unscheduled.push({ id: c.id, name: c.name, amount: value });
+      continue;
+    }
+    const step = c.status === "mensal" ? 1 : c.status === "anual" ? 12 : 0;
+    if (!step || !c.contractStart || seriesClients.has(`${c.status}|${c.id}`)) continue;
+    const end = c.contractEnd && c.contractEnd < yearEnd ? c.contractEnd : yearEnd;
+    for (let k = 0; ; k++) {
+      const date = addMonths(c.contractStart, step * k);
+      if (date > end) break;
+      if (date < currentMonthStart || months.has(date.slice(0, 7))) continue;
+      projected.push({ clientId: c.id, date, amount: value });
+    }
+  }
+
   const rows = new Map();
   const rowFor = (clientId) => {
     const id = clientId || null;
@@ -2949,6 +2985,7 @@ function billingForecast(incomes, clients, year, month, today = todayISO()) {
     }
   }
   for (const p of projected) {
+    if (p.date > yearEnd) continue;
     if (p.date >= yearStart) result.yearTotal += p.amount;
     if (p.date >= rangeStart) {
       result.forecast.projected += p.amount;
@@ -2956,6 +2993,7 @@ function billingForecast(incomes, clients, year, month, today = todayISO()) {
     }
   }
   result.forecast.total = result.forecast.registered + result.forecast.projected;
+  result.unscheduled = unscheduled;
   result.clients = [...rows.values()].filter((r) => r.month || r.forecast).sort((a, b) => b.forecast - a.forecast || b.month - a.month);
   return result;
 }
@@ -2982,7 +3020,7 @@ function FaturacaoView({ incomes, clients }) {
         <div>
           <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 700 }}>Faturação</h2>
           <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: mono }}>
-            receitas registadas (recebidas ou por receber) e mensalidades/renovações previstas
+            receitas registadas (recebidas ou por receber), mensalidades e renovações previstas e contratos dos clientes
           </p>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
@@ -3011,7 +3049,7 @@ function FaturacaoView({ incomes, clients }) {
           <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>prevista de {rangeLabel}</div>
           <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: GOLD, marginTop: 4 }}>{fmtEUR(r.forecast.total)}</div>
           <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>
-            {fmtEUR(r.forecast.registered)} registado · {fmtEUR(r.forecast.projected)} recorrente por criar
+            {fmtEUR(r.forecast.registered)} registado · {fmtEUR(r.forecast.projected)} de mensalidades e contratos por faturar
           </div>
         </div>
         <div style={{ flex: "1 1 200px", padding: "14px 16px", borderLeft: `1px solid ${LINE}` }}>
@@ -3021,8 +3059,16 @@ function FaturacaoView({ incomes, clients }) {
         </div>
       </div>
       <p style={{ margin: "0 0 24px", fontSize: 11, color: INK_SOFT, fontFamily: mono }}>
-        a previsão continua cada mensalidade todos os meses (ao valor mais recente) e cada renovação anual 12 meses depois; clientes terminados ficam de fora
+        a previsão continua cada mensalidade todos os meses (ao valor mais recente), cada renovação anual 12 meses depois e soma os contratos das fichas de clientes (valor e início) que ainda não têm receitas; clientes terminados ficam de fora
       </p>
+      {r.unscheduled.length > 0 && (
+        <div style={{ border: `1px dashed ${GOLD}`, padding: "12px 16px", margin: "-8px 0 24px", fontSize: 12, fontFamily: mono, color: INK_SOFT }}>
+          <span style={{ color: GOLD }}>por faturar, sem data: {fmtEUR(r.unscheduled.reduce((s, u) => s + u.amount, 0))}</span>
+          {" · "}
+          {r.unscheduled.map((u) => `${u.name} (${fmtEUR(u.amount)})`).join(", ")}
+          {" — "}compras únicas com valor na ficha do cliente e sem receitas; põe o início do contrato para entrarem na previsão
+        </div>
+      )}
 
       {r.clients.length === 0 ? (
         <p style={{ color: INK_SOFT, fontSize: 14 }}>Sem faturação de {rangeLabel} de {year}.</p>
