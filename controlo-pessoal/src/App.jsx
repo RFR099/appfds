@@ -632,6 +632,7 @@ function FinancasApp() {
           {[
             ["calendario", "Calendário", <CalendarDays size={14} />],
             ["balanco", "Balanço", <BarChart3 size={14} />],
+            ["faturacao", "Faturação", <TrendingUp size={14} />],
             ["receitas", "Receitas", <Landmark size={14} />],
             ["despesas", "Despesas", <Receipt size={14} />],
             ["notas", "Notas", <NotebookPen size={14} />],
@@ -726,6 +727,7 @@ function FinancasApp() {
       ) : (
         <>
           {tab === "calendario" && <CalendarView events={events} setEvents={setEvents} clients={clients} />}
+          {tab === "faturacao" && <FaturacaoView incomes={incomes} clients={clients} />}
           {tab === "balanco" && <BalancoView incomes={incomes} setIncomes={setIncomes} expenses={expenses} events={events} clients={clients} settings={settings} setSettings={setSettings} />}
           {tab === "receitas" && (
             <LedgerView
@@ -974,11 +976,11 @@ function recurrenceLabel(value) {
 
 // Soma meses a uma data AAAA-MM-DD. Se o dia não existir no mês de destino
 // (31 → fevereiro), fica no último dia desse mês em vez de saltar para o seguinte.
-function addMonths(dateStr, months) {
+function addMonths(dateStr, months, anchorDay) {
   const [y, m, d] = dateStr.split("-").map(Number);
   const target = new Date(Date.UTC(y, m - 1 + months, 1));
   const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-  target.setUTCDate(Math.min(d, lastDay));
+  target.setUTCDate(Math.min(anchorDay || d, lastDay));
   return target.toISOString().slice(0, 10);
 }
 
@@ -2879,6 +2881,208 @@ function MiniStat({ label, value, color }) {
   );
 }
 
+// Faturação de um mês e prevista desse mês até ao fim do ano.
+// Conta as receitas registadas (recebidas ou por receber) e acrescenta as
+// ocorrências recorrentes que ainda não foram criadas: as mensais continuam
+// todos os meses a partir da mais recente da série (mesmo cliente e
+// descrição), as anuais renovam 12 meses depois. Clientes terminados não
+// têm ocorrências previstas.
+function billingForecast(incomes, clients, year, month, today = todayISO()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const monthKeyStr = `${year}-${pad(month)}`;
+  const rangeStart = `${monthKeyStr}-01`;
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+  const clientById = new Map((clients || []).map((c) => [c.id, c]));
+  const ended = (c) => c.ended === true || (c.ended !== false && !!c.contractEnd && c.contractEnd < today);
+  const amountOf = (i) => Number(i.amount) || 0;
+
+  // ocorrências recorrentes por criar, até ao fim do ano
+  const projected = [];
+  const series = new Map();
+  for (const i of incomes) {
+    if (i.recurrence !== "mensal" && i.recurrence !== "anual") continue;
+    const key = `${i.recurrence}|${i.clientId || ""}|${i.desc}`;
+    const s = series.get(key) || { items: [] };
+    s.items.push(i);
+    series.set(key, s);
+  }
+  for (const { items } of series.values()) {
+    const last = items.reduce((a, b) => (b.date > a.date ? b : a));
+    const client = last.clientId ? clientById.get(last.clientId) : null;
+    if (client && ended(client)) continue;
+    const step = last.recurrence === "mensal" ? 1 : 12;
+    const anchorDay = last.recurrence === "mensal" ? Math.max(...items.map((i) => Number(i.date.slice(8, 10)))) : undefined;
+    for (let k = 1; ; k++) {
+      const date = addMonths(last.date, step * k, anchorDay);
+      if (date > yearEnd) break;
+      projected.push({ clientId: last.clientId || null, date, amount: amountOf(last) });
+    }
+  }
+
+  const rows = new Map();
+  const rowFor = (clientId) => {
+    const id = clientId || null;
+    if (!rows.has(id)) {
+      const c = id ? clientById.get(id) : null;
+      rows.set(id, { id, name: c ? c.name : id ? "Cliente removido" : "Sem cliente", month: 0, forecast: 0 });
+    }
+    return rows.get(id);
+  };
+
+  const result = {
+    month: { total: 0, received: 0, pending: 0 },
+    forecast: { total: 0, registered: 0, projected: 0 },
+    yearTotal: 0,
+  };
+  for (const i of incomes) {
+    const a = amountOf(i);
+    if (i.date >= yearStart && i.date <= yearEnd) result.yearTotal += a;
+    if (i.date.slice(0, 7) === monthKeyStr) {
+      result.month.total += a;
+      result.month[i.received === false ? "pending" : "received"] += a;
+      rowFor(i.clientId).month += a;
+    }
+    if (i.date >= rangeStart && i.date <= yearEnd) {
+      result.forecast.registered += a;
+      rowFor(i.clientId).forecast += a;
+    }
+  }
+  for (const p of projected) {
+    if (p.date >= yearStart) result.yearTotal += p.amount;
+    if (p.date >= rangeStart) {
+      result.forecast.projected += p.amount;
+      rowFor(p.clientId).forecast += p.amount;
+    }
+  }
+  result.forecast.total = result.forecast.registered + result.forecast.projected;
+  result.clients = [...rows.values()].filter((r) => r.month || r.forecast).sort((a, b) => b.forecast - a.forecast || b.month - a.month);
+  return result;
+}
+
+function FaturacaoView({ incomes, clients }) {
+  const today = todayISO();
+  const [year, setYear] = useState(Number(today.slice(0, 4)));
+  const [month, setMonth] = useState(Number(today.slice(5, 7)));
+  const years = useMemo(() => {
+    const set = new Set(incomes.map((i) => Number(i.date.slice(0, 4))));
+    set.add(Number(today.slice(0, 4)));
+    return [...set].sort();
+  }, [incomes, today]);
+  const r = useMemo(() => billingForecast(incomes, clients, year, month, today), [incomes, clients, year, month, today]);
+  const monthName = MONTHS_PT[month - 1].toLowerCase();
+  const rangeLabel = month === 12 ? "dezembro" : `${monthName} a dezembro`;
+  const chartData = r.clients.map((c) => ({ name: c.name, mes: c.month, previsto: c.forecast }));
+  const mono = "'IBM Plex Mono', monospace";
+  const selectStyle = { padding: "6px 8px", border: `1px solid ${LINE}`, background: PAPER, fontSize: 12, color: INK };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 700 }}>Faturação</h2>
+          <p style={{ margin: 0, fontSize: 12, color: INK_SOFT, fontFamily: mono }}>
+            receitas registadas (recebidas ou por receber) e mensalidades/renovações previstas
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <select aria-label="mês" value={month} onChange={(e) => setMonth(Number(e.target.value))} style={selectStyle}>
+            {MONTHS_PT.map((m, idx) => (
+              <option key={m} value={idx + 1}>{m}</option>
+            ))}
+          </select>
+          <select aria-label="ano" value={year} onChange={(e) => setYear(Number(e.target.value))} style={selectStyle}>
+            {years.map((y) => (
+              <option key={y} value={y}>{y}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", border: `1px solid ${LINE}`, background: CARD, marginBottom: 8 }}>
+        <div style={{ flex: "1 1 200px", padding: "14px 16px" }}>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>faturação de {monthName}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: INK, marginTop: 4 }}>{fmtEUR(r.month.total)}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>
+            <span style={{ color: GREEN }}>{fmtEUR(r.month.received)}</span> recebido · <span style={{ color: GOLD }}>{fmtEUR(r.month.pending)}</span> por receber
+          </div>
+        </div>
+        <div style={{ flex: "1 1 200px", padding: "14px 16px", borderLeft: `1px solid ${LINE}`, background: HILITE }}>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>prevista de {rangeLabel}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: GOLD, marginTop: 4 }}>{fmtEUR(r.forecast.total)}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>
+            {fmtEUR(r.forecast.registered)} registado · {fmtEUR(r.forecast.projected)} recorrente por criar
+          </div>
+        </div>
+        <div style={{ flex: "1 1 200px", padding: "14px 16px", borderLeft: `1px solid ${LINE}` }}>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT }}>total previsto em {year}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: INK, marginTop: 4 }}>{fmtEUR(r.yearTotal)}</div>
+          <div style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, marginTop: 4 }}>janeiro a dezembro</div>
+        </div>
+      </div>
+      <p style={{ margin: "0 0 24px", fontSize: 11, color: INK_SOFT, fontFamily: mono }}>
+        a previsão continua cada mensalidade todos os meses (ao valor mais recente) e cada renovação anual 12 meses depois; clientes terminados ficam de fora
+      </p>
+
+      {r.clients.length === 0 ? (
+        <p style={{ color: INK_SOFT, fontSize: 14 }}>Sem faturação de {rangeLabel} de {year}.</p>
+      ) : (
+        <>
+          <div style={{ border: `1px solid ${LINE}`, background: CARD, padding: "20px 20px 8px", marginBottom: 28 }}>
+            <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600, color: INK }}>Por cliente</h3>
+            <p style={{ margin: "0 0 10px", fontSize: 12, color: INK_SOFT, fontFamily: mono }}>
+              {monthName} e previsto de {rangeLabel} de {year}
+            </p>
+            <ResponsiveContainer width="100%" height={Math.max(160, chartData.length * 54 + 50)}>
+              <ComposedChart data={chartData} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
+                <CartesianGrid stroke={LINE} horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11, fontFamily: "IBM Plex Mono", fill: INK_SOFT }} axisLine={{ stroke: LINE }} tickLine={false} tickFormatter={(v) => `€${v}`} />
+                <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11, fill: INK }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  formatter={(value, name) => [fmtEUR(value), name]}
+                  contentStyle={{ background: CARD, border: `1px solid ${LINE}`, fontSize: 12, fontFamily: mono }}
+                  labelStyle={{ color: INK }}
+                />
+                <Legend wrapperStyle={{ fontSize: 12, fontFamily: mono, paddingTop: 8 }} />
+                <Bar dataKey="mes" name={`Faturação de ${monthName}`} fill={GREEN} radius={[0, 2, 2, 0]} barSize={14} />
+                <Bar dataKey="previsto" name={`Prevista de ${rangeLabel}`} fill={GOLD} radius={[0, 2, 2, 0]} barSize={14} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ overflowX: "auto", border: `1px solid ${LINE}`, background: CARD }}>
+            <table aria-label={`faturação por cliente em ${monthName} de ${year}`} style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ fontSize: 11, fontFamily: mono, color: INK_SOFT, textAlign: "right" }}>
+                  <th scope="col" style={{ textAlign: "left", padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>cliente</th>
+                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{monthName}</th>
+                  <th scope="col" style={{ padding: "8px 12px", fontWeight: 400, borderBottom: `1px solid ${LINE}` }}>{rangeLabel}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.clients.map((c) => (
+                  <tr key={c.id || "sem-cliente"} className="row-hover">
+                    <th scope="row" style={{ textAlign: "left", padding: "10px 12px", fontWeight: 600, borderBottom: `1px solid ${LINE}` }}>{c.name}</th>
+                    <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono, color: c.month ? GREEN : INK_SOFT, borderBottom: `1px solid ${LINE}` }}>{fmtEUR(c.month)}</td>
+                    <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono, color: GOLD, borderBottom: `1px solid ${LINE}` }}>{fmtEUR(c.forecast)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ fontWeight: 700, background: HILITE }}>
+                  <th scope="row" style={{ textAlign: "left", padding: "10px 12px", fontFamily: mono, fontSize: 11, fontWeight: 400, color: INK_SOFT }}>total</th>
+                  <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono }}>{fmtEUR(r.month.total)}</td>
+                  <td style={{ textAlign: "right", padding: "10px 12px", fontFamily: mono, color: GOLD }}>{fmtEUR(r.forecast.total)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function CalendarView({ events, setEvents, clients }) {
   const [cursor, setCursor] = useState(() => {
     const d = new Date();
@@ -3158,4 +3362,4 @@ function CalendarView({ events, setEvents, clients }) {
 }
 
 // usadas pelos testes (App.test.jsx)
-export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText, salesInMonth, isEnded, monthlyValue, needsReceipt };
+export { parseNum, todayISO, addMonths, daysBetween, markReceived, normalizeText, salesInMonth, isEnded, monthlyValue, needsReceipt, billingForecast };
